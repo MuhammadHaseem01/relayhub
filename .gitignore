@@ -1,0 +1,22 @@
+# Binaries
+/relayhub
+*.exe
+
+# Go build cache
+*.out
+
+# Environment secrets — never commit your real .env
+.env
+
+# Docker volumes
+postgres_data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
