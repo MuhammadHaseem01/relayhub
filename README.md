@@ -50,6 +50,18 @@ You need two things: a **bot token** and your **chat_id**.
 
 ---
 
+## Getting a free Resend API key (Email)
+
+Resend allows you to send up to 100 emails/day for free without a credit card.
+
+1. Go to [Resend.com](https://resend.com) and sign up.
+2. Navigate to **API Keys** and click **Create API Key**.
+3. Give it full access and copy the generated token.
+4. Set it as `RESEND_API_KEY` in your `.env`.
+5. Set `FROM_EMAIL` to a valid address (e.g., `onboarding@resend.dev` for testing, or your verified domain).
+
+---
+
 ## Running locally with Docker Compose
 
 ### Prerequisites
@@ -136,6 +148,8 @@ Returns recent delivery attempts, newest first.
       "message":       "Hello!",
       "status":        "delivered",
       "error_message": "",
+      "attempts":      1,
+      "fallback_used": false,
       "created_at":    "2026-07-12T18:00:00Z"
     }
   ]
@@ -160,8 +174,27 @@ curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
     "recipient": "YOUR_CHAT_ID",
-    "message":   "Hello from RelayHub! 🚀",
+    "message":   "Hello from RelayHub via Telegram! 🚀",
     "channel":   "telegram"
+  }' | jq
+
+# Send an Email message
+curl -s -X POST http://localhost:8080/v1/notify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "recipient": "user@example.com",
+    "message":   "Hello from RelayHub via Email! 📧",
+    "channel":   "email"
+  }' | jq
+
+# Send with Auto Fallback (Telegram -> Email)
+curl -s -X POST http://localhost:8080/v1/notify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "telegram_recipient": "INVALID_CHAT_ID",
+    "email_recipient":    "user@example.com",
+    "message":            "This will fallback to Email! 🔄",
+    "channel":            "auto"
   }' | jq
 
 # View delivery logs

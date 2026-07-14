@@ -16,6 +16,8 @@ type NotificationRecord struct {
 	Message      string    `json:"message"`
 	Status       string    `json:"status"`
 	ErrorMessage string    `json:"error_message"`
+	Attempts     int       `json:"attempts"`
+	FallbackUsed bool      `json:"fallback_used"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 type Store struct {
@@ -56,6 +58,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 		);
 
+		ALTER TABLE notifications ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 1;
+		ALTER TABLE notifications ADD COLUMN IF NOT EXISTS fallback_used BOOLEAN DEFAULT false;
+
 		CREATE INDEX IF NOT EXISTS idx_notifications_request_id
 			ON notifications (request_id);
 
@@ -68,9 +73,9 @@ func (s *Store) migrate(ctx context.Context) error {
 func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notifications
-			(request_id, recipient, channel, message, status, error_message)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, rec.RequestID, rec.Recipient, rec.Channel, rec.Message, rec.Status, rec.ErrorMessage)
+			(request_id, recipient, channel, message, status, error_message, attempts, fallback_used)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, rec.RequestID, rec.Recipient, rec.Channel, rec.Message, rec.Status, rec.ErrorMessage, rec.Attempts, rec.FallbackUsed)
 	if err != nil {
 		return fmt.Errorf("store: failed to log notification: %w", err)
 	}
@@ -79,7 +84,7 @@ func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) err
 
 func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, request_id, recipient, channel, message, status, error_message, created_at
+		SELECT id, request_id, recipient, channel, message, status, error_message, attempts, fallback_used, created_at
 		FROM notifications
 		ORDER BY created_at DESC
 		LIMIT $1
@@ -94,7 +99,7 @@ func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, e
 		var r NotificationRecord
 		if err := rows.Scan(
 			&r.ID, &r.RequestID, &r.Recipient, &r.Channel,
-			&r.Message, &r.Status, &r.ErrorMessage, &r.CreatedAt,
+			&r.Message, &r.Status, &r.ErrorMessage, &r.Attempts, &r.FallbackUsed, &r.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("store: row scan error: %w", err)
 		}

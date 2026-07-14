@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"relayhub/internal/providers"
+	"relayhub/internal/retry"
 	"relayhub/internal/store"
 )
 
@@ -34,9 +35,11 @@ func NewNotifyHandler(senders []providers.Sender, s *store.Store, logger *slog.L
 // ── Request / Response types ──────────────────────────────────────────────────
 
 type notifyRequest struct {
-	Recipient string `json:"recipient" binding:"required"`
-	Message   string `json:"message"   binding:"required"`
-	Channel   string `json:"channel"   binding:"required"`
+	Message           string `json:"message"   binding:"required"`
+	Channel           string `json:"channel"   binding:"required"`
+	Recipient         string `json:"recipient"`
+	TelegramRecipient string `json:"telegram_recipient"`
+	EmailRecipient    string `json:"email_recipient"`
 }
 
 type notifyResponse struct {
@@ -65,24 +68,84 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 		return
 	}
 
+	if req.Channel == "auto" {
+		if req.TelegramRecipient == "" || req.EmailRecipient == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"request_id": requestID,
+				"error":      "channel 'auto' requires both telegram_recipient and email_recipient",
+			})
+			return
+		}
+	} else {
+		if req.Recipient == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"request_id": requestID,
+				"error":      "recipient is required for channel: " + req.Channel,
+			})
+			return
+		}
+	}
+
 	log.Info("notify request received",
 		"channel", req.Channel,
 		"recipient", req.Recipient,
+		"telegram_recipient", req.TelegramRecipient,
+		"email_recipient", req.EmailRecipient,
 	)
 
-	provider, ok := h.providers[req.Channel]
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"request_id": requestID,
-			"error":      "unsupported channel: " + req.Channel + " — supported: telegram",
-		})
-		return
+	var status = "delivered"
+	var errMsg = ""
+	var totalAttempts = 0
+	var fallbackUsed = false
+	var sendErr error
+	var finalRecipient = req.Recipient
+
+	if req.Channel == "auto" {
+		telegramProvider, ok1 := h.providers["telegram"]
+		emailProvider, ok2 := h.providers["email"]
+		if !ok1 || !ok2 {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"request_id": requestID,
+				"error":      "auto channel requires both telegram and email providers to be configured",
+			})
+			return
+		}
+
+		finalRecipient = req.TelegramRecipient
+		sendErr = retry.WithRetry(func() error {
+			totalAttempts++
+			return telegramProvider.Send(req.TelegramRecipient, req.Message)
+		}, 3)
+
+		if sendErr != nil {
+			fallbackUsed = true
+			log.Warn("telegram failed after retries, falling back to email", "error", sendErr)
+			
+			finalRecipient = req.EmailRecipient
+			emailAttempts := 0
+			sendErr = retry.WithRetry(func() error {
+				emailAttempts++
+				return emailProvider.Send(req.EmailRecipient, req.Message)
+			}, 3)
+			totalAttempts += emailAttempts
+		}
+
+	} else {
+		provider, ok := h.providers[req.Channel]
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"request_id": requestID,
+				"error":      "unsupported channel: " + req.Channel + " — supported: telegram, email, auto",
+			})
+			return
+		}
+
+		sendErr = retry.WithRetry(func() error {
+			totalAttempts++
+			return provider.Send(req.Recipient, req.Message)
+		}, 3)
 	}
 
-	sendErr := provider.Send(req.Recipient, req.Message)
-
-	status := "delivered"
-	errMsg := ""
 	if sendErr != nil {
 		status = "failed"
 		errMsg = sendErr.Error()
@@ -99,11 +162,13 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 	defer cancel()
 	if logErr := h.store.LogNotification(logCtx, store.NotificationRecord{
 		RequestID:    requestID,
-		Recipient:    req.Recipient,
+		Recipient:    finalRecipient,
 		Channel:      req.Channel,
 		Message:      req.Message,
 		Status:       status,
 		ErrorMessage: errMsg,
+		Attempts:     totalAttempts,
+		FallbackUsed: fallbackUsed,
 	}); logErr != nil {
 		log.Warn("failed to write notification log", "error", logErr)
 	}

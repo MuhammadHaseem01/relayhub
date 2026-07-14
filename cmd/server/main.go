@@ -34,6 +34,7 @@ func main() {
 
 	senderList := []providers.Sender{
 		providers.NewTelegramProvider(cfg.TelegramBotToken),
+		providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail),
 	}
 
 	gin.SetMode(gin.ReleaseMode)
