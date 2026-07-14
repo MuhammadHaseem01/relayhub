@@ -36,6 +36,12 @@ func Load() (*Config, error) {
 	if cfg.TelegramBotToken == "" {
 		return nil, fmt.Errorf("config: TELEGRAM_BOT_TOKEN is required")
 	}
+	if cfg.ResendAPIKey == "" {
+		return nil, fmt.Errorf("config: RESEND_API_KEY is required")
+	}
+	if cfg.FromEmail == "" {
+		return nil, fmt.Errorf("config: FROM_EMAIL is required")
+	}
 
 	return cfg, nil
 }

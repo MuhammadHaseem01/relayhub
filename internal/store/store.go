@@ -55,11 +55,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			message       TEXT         NOT NULL,
 			status        TEXT         NOT NULL,
 			error_message TEXT         NOT NULL DEFAULT '',
+			attempts      INT          NOT NULL DEFAULT 1,
+			fallback_used BOOLEAN      NOT NULL DEFAULT false,
 			created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 		);
-
-		ALTER TABLE notifications ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 1;
-		ALTER TABLE notifications ADD COLUMN IF NOT EXISTS fallback_used BOOLEAN DEFAULT false;
 
 		CREATE INDEX IF NOT EXISTS idx_notifications_request_id
 			ON notifications (request_id);

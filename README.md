@@ -11,6 +11,7 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 | Feature | Status |
 |---|---|
 | `POST /v1/notify` — send a Telegram message | ✅ |
+| `POST /v1/notify` — send an Email with fallback | ✅ |
 | `GET /v1/logs` — view recent delivery history | ✅ |
 | `GET /health` — health check endpoint | ✅ |
 | Delivery log persisted in PostgreSQL | ✅ |
@@ -50,15 +51,16 @@ You need two things: a **bot token** and your **chat_id**.
 
 ---
 
-## Getting a free Resend API key (Email)
+## Getting a free Resend API key (Email Provider)
 
-Resend allows you to send up to 100 emails/day for free without a credit card.
+You can send up to 3,000 emails per month for free using Resend.
 
-1. Go to [Resend.com](https://resend.com) and sign up.
-2. Navigate to **API Keys** and click **Create API Key**.
-3. Give it full access and copy the generated token.
-4. Set it as `RESEND_API_KEY` in your `.env`.
-5. Set `FROM_EMAIL` to a valid address (e.g., `onboarding@resend.dev` for testing, or your verified domain).
+1. Go to [resend.com](https://resend.com) and create a free account (no credit card required).
+2. Once logged in, go to **API Keys** on the sidebar.
+3. Click **Create API Key**. Give it a name and ensure it has "Sending access".
+4. Copy the generated key. It will look like: `re_123456789...`
+5. This is your `RESEND_API_KEY`.
+6. For the `FROM_EMAIL`, you can use `onboarding@resend.dev` to test sending emails to the address you signed up with.
 
 ---
 
@@ -78,8 +80,11 @@ cd relayhub
 # 2. Create your .env from the template
 cp .env.example .env
 
-# 3. Fill in your Telegram bot token in .env
-#    Open .env and replace: TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+# 3. Fill in your bot token and Resend key in .env
+#    Open .env and replace:
+#    TELEGRAM_BOT_TOKEN="your_token"
+#    RESEND_API_KEY="re_your_key"
+#    FROM_EMAIL="onboarding@resend.dev"
 
 # 4. Start everything
 docker compose up --build
@@ -102,12 +107,23 @@ docker compose down -v       # stop and delete DB data
 
 Send a notification.
 
-**Request body:**
+**Request body (Telegram or Email):**
 ```json
 {
   "recipient": "987654321",
   "message":   "Hello from RelayHub! 🚀",
-  "channel":   "telegram"
+  "channel":   "telegram" // or "email"
+}
+```
+
+**Request body (Auto Fallback):**
+If channel is "auto", the system will try Telegram first. If it completely fails, it will automatically fall back to Email.
+```json
+{
+  "message":            "Hello from RelayHub! 🚀",
+  "channel":            "auto",
+  "telegram_recipient": "987654321",
+  "email_recipient":    "you@example.com"
 }
 ```
 
@@ -174,7 +190,7 @@ curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
     "recipient": "YOUR_CHAT_ID",
-    "message":   "Hello from RelayHub via Telegram! 🚀",
+    "message":   "Hello from RelayHub! 🚀",
     "channel":   "telegram"
   }' | jq
 
@@ -182,18 +198,18 @@ curl -s -X POST http://localhost:8080/v1/notify \
 curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
-    "recipient": "user@example.com",
-    "message":   "Hello from RelayHub via Email! 📧",
+    "recipient": "you@example.com",
+    "message":   "Hello from RelayHub via Email! 🚀",
     "channel":   "email"
   }' | jq
 
-# Send with Auto Fallback (Telegram -> Email)
+# Use Auto-Fallback (Telegram -> Email)
 curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
-    "telegram_recipient": "INVALID_CHAT_ID",
-    "email_recipient":    "user@example.com",
-    "message":            "This will fallback to Email! 🔄",
+    "telegram_recipient": "INVALID_CHAT_ID_TO_FORCE_FALLBACK",
+    "email_recipient":    "you@example.com",
+    "message":            "Fallback test message!",
     "channel":            "auto"
   }' | jq
 

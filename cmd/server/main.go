@@ -32,10 +32,12 @@ func main() {
 	defer db.Close()
 	logger.Info("connected to postgres")
 
-	senderList := []providers.Sender{
-		providers.NewTelegramProvider(cfg.TelegramBotToken),
-		providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail),
-	}
+	// Initialize providers
+	telegram := providers.NewTelegramProvider(cfg.TelegramBotToken)
+	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
+
+	// Initialize HTTP handlers
+	notifyHandler := handlers.NewNotifyHandler([]providers.Sender{telegram, email}, db, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -45,8 +47,6 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "relayhub"})
 	})
-
-	notifyHandler := handlers.NewNotifyHandler(senderList, db, logger)
 
 	v1 := router.Group("/v1")
 	{

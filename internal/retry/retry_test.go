@@ -2,46 +2,72 @@ package retry
 
 import (
 	"errors"
+	"log/slog"
+	"os"
 	"testing"
 )
 
-func TestWithRetry_SuccessOnThirdAttempt(t *testing.T) {
-	attempts := 0
-	expectedError := errors.New("temporary error")
-
+func TestWithRetry_SuccessOnFirstAttempt(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	calls := 0
 	fn := func() error {
-		attempts++
-		if attempts < 3 {
-			return expectedError
+		calls++
+		return nil
+	}
+
+	attempts, err := WithRetry(fn, 3, logger)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected attempts to be 1, got %d", attempts)
+	}
+}
+
+func TestWithRetry_SuccessAfterRetries(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	calls := 0
+	fn := func() error {
+		calls++
+		if calls < 3 {
+			return errors.New("temporary error")
 		}
 		return nil
 	}
 
-	err := WithRetry(fn, 3)
-
+	// We override sleep for testing to avoid waiting
+	attempts, err := WithRetry(fn, 3, logger)
 	if err != nil {
-		t.Errorf("expected nil error, got %v", err)
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls, got %d", calls)
 	}
 	if attempts != 3 {
-		t.Errorf("expected 3 attempts, got %d", attempts)
+		t.Fatalf("expected attempts to be 3, got %d", attempts)
 	}
 }
 
-func TestWithRetry_FailureExhaustsAttempts(t *testing.T) {
-	attempts := 0
-	expectedError := errors.New("permanent error")
-
+func TestWithRetry_ExhaustsAllRetries(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	calls := 0
+	expectedErr := errors.New("fatal error")
 	fn := func() error {
-		attempts++
-		return expectedError
+		calls++
+		return expectedErr
 	}
 
-	err := WithRetry(fn, 3)
-
-	if err != expectedError {
-		t.Errorf("expected %v, got %v", expectedError, err)
+	attempts, err := WithRetry(fn, 3, logger)
+	if err != expectedErr {
+		t.Fatalf("expected error %v, got %v", expectedErr, err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls, got %d", calls)
 	}
 	if attempts != 3 {
-		t.Errorf("expected 3 attempts, got %d", attempts)
+		t.Fatalf("expected attempts to be 3, got %d", attempts)
 	}
 }
