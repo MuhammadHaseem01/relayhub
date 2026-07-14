@@ -8,25 +8,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NotificationRecord represents a single delivery attempt persisted in Postgres.
 type NotificationRecord struct {
 	ID           int64     `json:"id"`
 	RequestID    string    `json:"request_id"`
 	Recipient    string    `json:"recipient"`
 	Channel      string    `json:"channel"`
 	Message      string    `json:"message"`
-	Status       string    `json:"status"`        // "delivered" | "failed"
-	ErrorMessage string    `json:"error_message"` // empty string on success
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"error_message"`
 	CreatedAt    time.Time `json:"created_at"`
 }
-
-// Store wraps the PostgreSQL connection pool and exposes typed operations.
 type Store struct {
 	pool *pgxpool.Pool
 }
 
-// New opens a connection pool to the given PostgreSQL DSN and runs the
-// embedded schema migration (idempotent — safe to call on every startup).
 func New(databaseURL string) (*Store, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -48,8 +43,6 @@ func New(databaseURL string) (*Store, error) {
 	return s, nil
 }
 
-// migrate runs the embedded DDL. All statements use IF NOT EXISTS so this is
-// fully idempotent and safe to execute on every application startup.
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS notifications (
@@ -72,7 +65,6 @@ func (s *Store) migrate(ctx context.Context) error {
 	return err
 }
 
-// LogNotification inserts a delivery record. Called after every /notify attempt.
 func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notifications
@@ -85,7 +77,6 @@ func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) err
 	return nil
 }
 
-// GetLogs returns the most recent notifications, newest first.
 func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, request_id, recipient, channel, message, status, error_message, created_at
@@ -113,7 +104,6 @@ func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, e
 	return records, rows.Err()
 }
 
-// Close releases the connection pool. Call via defer in main.
 func (s *Store) Close() {
 	s.pool.Close()
 }
