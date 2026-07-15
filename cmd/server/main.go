@@ -37,7 +37,8 @@ func main() {
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
 
 	// Initialize HTTP handlers
-	notifyHandler := handlers.NewNotifyHandler([]providers.Sender{telegram, email}, db, logger)
+	idemStore := store.NewInMemoryIdempotencyStore()
+	notifyHandler := handlers.NewNotifyHandler([]providers.Sender{telegram, email}, db, idemStore, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()

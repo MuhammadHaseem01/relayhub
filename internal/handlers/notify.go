@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,18 +20,19 @@ import (
 // It holds a registry of providers keyed by their Name() value,
 // so routing to the right provider is a simple map lookup.
 type NotifyHandler struct {
-	providers map[string]providers.Sender
-	store     *store.Store
-	logger    *slog.Logger
+	providers   map[string]providers.Sender
+	store       *store.Store
+	idempotency store.IdempotencyStore
+	logger      *slog.Logger
 }
 
 // NewNotifyHandler builds the handler and registers all provided Senders.
-func NewNotifyHandler(senders []providers.Sender, s *store.Store, logger *slog.Logger) *NotifyHandler {
+func NewNotifyHandler(senders []providers.Sender, s *store.Store, idem store.IdempotencyStore, logger *slog.Logger) *NotifyHandler {
 	m := make(map[string]providers.Sender, len(senders))
 	for _, p := range senders {
 		m[p.Name()] = p
 	}
-	return &NotifyHandler{providers: m, store: s, logger: logger}
+	return &NotifyHandler{providers: m, store: s, idempotency: idem, logger: logger}
 }
 
 // ── Request / Response types ──────────────────────────────────────────────────
@@ -41,6 +43,7 @@ type notifyRequest struct {
 	EmailRecipient    string `json:"email_recipient"`
 	Message           string `json:"message" binding:"required"`
 	Channel           string `json:"channel" binding:"required"`
+	IdempotencyKey    string `json:"idempotency_key"`
 }
 
 type notifyResponse struct {
@@ -67,6 +70,46 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 			"error":      "invalid request body: " + err.Error(),
 		})
 		return
+	}
+
+	// Determine idempotency key
+	idempotencyKey := req.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = c.GetHeader("X-Idempotency-Key")
+	}
+
+	var wasCached bool
+
+	if idempotencyKey != "" {
+		record, exists := h.idempotency.GetOrCreate(idempotencyKey)
+		if exists {
+			if record.InProgress {
+				c.JSON(http.StatusConflict, gin.H{
+					"request_id": requestID,
+					"error":      "a request with this idempotency key is currently processing",
+				})
+				return
+			}
+			// Cached response
+			wasCached = true
+			log.Info("serving from idempotency cache", "key", idempotencyKey)
+			
+			// Log the cached response
+			dbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = h.store.LogNotification(dbCtx, store.NotificationRecord{
+				RequestID:         requestID,
+				Recipient:         req.Recipient, // best effort for cached logs
+				Channel:           req.Channel,
+				Message:           req.Message,
+				Status:            "delivered (cached)",
+				IdempotencyKey:    idempotencyKey,
+				WasCachedResponse: true,
+			})
+			
+			c.Data(record.StatusCode, "application/json", record.Body)
+			return
+		}
 	}
 
 	// Validate recipients based on channel
@@ -119,14 +162,16 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 		dbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = h.store.LogNotification(dbCtx, store.NotificationRecord{
-			RequestID:    requestID,
-			Recipient:    recipient,
-			Channel:      channelName,
-			Message:      req.Message,
-			Status:       logStatus,
-			ErrorMessage: logErr,
-			Attempts:     attempts,
-			FallbackUsed: fallbackUsed,
+			RequestID:         requestID,
+			Recipient:         recipient,
+			Channel:           channelName,
+			Message:           req.Message,
+			Status:            logStatus,
+			ErrorMessage:      logErr,
+			Attempts:          attempts,
+			FallbackUsed:      fallbackUsed,
+			IdempotencyKey:    idempotencyKey,
+			WasCachedResponse: wasCached,
 		})
 		
 		return attempts, err
@@ -156,6 +201,7 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 		log.Info("notification delivered", "channel", finalChannel)
 	}
 
+	var respBody []byte
 	if sendErr != nil {
 		c.JSON(http.StatusBadGateway, notifyResponse{
 			RequestID: requestID,
@@ -163,14 +209,41 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 			Channel:   finalChannel,
 			Error:     errMsg,
 		})
-		return
+	} else {
+		c.JSON(http.StatusOK, notifyResponse{
+			RequestID: requestID,
+			Status:    status,
+			Channel:   finalChannel,
+		})
 	}
-
-	c.JSON(http.StatusOK, notifyResponse{
-		RequestID: requestID,
-		Status:    status,
-		Channel:   finalChannel,
-	})
+	
+	// Save the response to idempotency store if a key was provided
+	if idempotencyKey != "" {
+		// Create a mock body since gin doesn't easily expose the written body
+		// We know exactly what we just wrote
+		var statusCode int
+		var resp notifyResponse
+		
+		if sendErr != nil {
+			statusCode = http.StatusBadGateway
+			resp = notifyResponse{
+				RequestID: requestID,
+				Status:    status,
+				Channel:   finalChannel,
+				Error:     errMsg,
+			}
+		} else {
+			statusCode = http.StatusOK
+			resp = notifyResponse{
+				RequestID: requestID,
+				Status:    status,
+				Channel:   finalChannel,
+			}
+		}
+		
+		respBody, _ = json.Marshal(resp)
+		h.idempotency.Save(idempotencyKey, statusCode, respBody)
+	}
 }
 
 // Logs handles GET /v1/logs

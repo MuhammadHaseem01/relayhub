@@ -213,6 +213,16 @@ curl -s -X POST http://localhost:8080/v1/notify \
     "channel":            "auto"
   }' | jq
 
+# Send an Idempotent request (prevents duplicate sends)
+curl -s -X POST http://localhost:8080/v1/notify \
+  -H "Content-Type: application/json" \
+  -H "X-Idempotency-Key: my-unique-key-123" \
+  -d '{
+    "recipient": "987654321",
+    "message":   "Hello exactly once! 🚀",
+    "channel":   "telegram"
+  }' | jq
+
 # View delivery logs
 curl -s http://localhost:8080/v1/logs | jq
 
