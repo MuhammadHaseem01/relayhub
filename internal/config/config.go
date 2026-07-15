@@ -12,6 +12,8 @@ type Config struct {
 	Port             string
 	DatabaseURL      string
 	TelegramBotToken string
+	ResendAPIKey     string
+	FromEmail        string
 }
 
 // Load reads configuration from a .env file (if present) and environment variables.
@@ -24,6 +26,8 @@ func Load() (*Config, error) {
 		Port:             getEnv("PORT", "8080"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		ResendAPIKey:     os.Getenv("RESEND_API_KEY"),
+		FromEmail:        os.Getenv("FROM_EMAIL"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -31,6 +35,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.TelegramBotToken == "" {
 		return nil, fmt.Errorf("config: TELEGRAM_BOT_TOKEN is required")
+	}
+	if cfg.ResendAPIKey == "" {
+		return nil, fmt.Errorf("config: RESEND_API_KEY is required")
+	}
+	if cfg.FromEmail == "" {
+		return nil, fmt.Errorf("config: FROM_EMAIL is required")
 	}
 
 	return cfg, nil

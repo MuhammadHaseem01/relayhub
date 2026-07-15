@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"relayhub/internal/providers"
+	"relayhub/internal/retry"
 	"relayhub/internal/store"
 )
 
@@ -34,9 +36,11 @@ func NewNotifyHandler(senders []providers.Sender, s *store.Store, logger *slog.L
 // ── Request / Response types ──────────────────────────────────────────────────
 
 type notifyRequest struct {
-	Recipient string `json:"recipient" binding:"required"`
-	Message   string `json:"message"   binding:"required"`
-	Channel   string `json:"channel"   binding:"required"`
+	Recipient         string `json:"recipient"`
+	TelegramRecipient string `json:"telegram_recipient"`
+	EmailRecipient    string `json:"email_recipient"`
+	Message           string `json:"message" binding:"required"`
+	Channel           string `json:"channel" binding:"required"`
 }
 
 type notifyResponse struct {
@@ -65,54 +69,98 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 		return
 	}
 
-	log.Info("notify request received",
-		"channel", req.Channel,
-		"recipient", req.Recipient,
-	)
-
-	provider, ok := h.providers[req.Channel]
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"request_id": requestID,
-			"error":      "unsupported channel: " + req.Channel + " — supported: telegram",
-		})
+	// Validate recipients based on channel
+	if req.Channel == "auto" {
+		if req.TelegramRecipient == "" || req.EmailRecipient == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "auto channel requires both telegram_recipient and email_recipient"})
+			return
+		}
+	} else if req.Channel == "telegram" || req.Channel == "email" {
+		if req.Recipient == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "recipient is required for " + req.Channel})
+			return
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "unsupported channel: " + req.Channel + " — supported: telegram, email, auto"})
 		return
 	}
 
-	sendErr := provider.Send(req.Recipient, req.Message)
+	log.Info("notify request received",
+		"channel", req.Channel,
+	)
 
-	status := "delivered"
-	errMsg := ""
+	var sendErr error
+	var status string
+	var errMsg string
+	var finalChannel string
+	var fallbackUsed bool
+	totalAttempts := 0
+
+	executeProvider := func(channelName string, recipient string) (int, error) {
+		provider, ok := h.providers[channelName]
+		if !ok {
+			return 0, fmt.Errorf("provider not found: %s", channelName)
+		}
+		
+		attempts, err := retry.WithRetry(func() error {
+			return provider.Send(recipient, req.Message)
+		}, 3, h.logger)
+		
+		totalAttempts += attempts
+		
+		// Log the attempt to DB
+		logStatus := "delivered"
+		logErr := ""
+		if err != nil {
+			logStatus = "failed"
+			logErr = err.Error()
+		}
+		
+		dbCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = h.store.LogNotification(dbCtx, store.NotificationRecord{
+			RequestID:    requestID,
+			Recipient:    recipient,
+			Channel:      channelName,
+			Message:      req.Message,
+			Status:       logStatus,
+			ErrorMessage: logErr,
+			Attempts:     attempts,
+			FallbackUsed: fallbackUsed,
+		})
+		
+		return attempts, err
+	}
+
+	if req.Channel == "auto" {
+		finalChannel = "telegram"
+		_, sendErr = executeProvider("telegram", req.TelegramRecipient)
+		
+		if sendErr != nil {
+			fallbackUsed = true
+			finalChannel = "email"
+			log.Warn("telegram failed completely, falling back to email", "request_id", requestID)
+			_, sendErr = executeProvider("email", req.EmailRecipient)
+		}
+	} else {
+		finalChannel = req.Channel
+		_, sendErr = executeProvider(req.Channel, req.Recipient)
+	}
+
 	if sendErr != nil {
 		status = "failed"
 		errMsg = sendErr.Error()
-		log.Error("notification failed",
-			"channel", req.Channel,
-			"error", sendErr,
-		)
+		log.Error("notification failed", "channel", finalChannel, "error", sendErr)
 	} else {
-		log.Info("notification delivered", "channel", req.Channel)
-	}
-
-	// Persist the log record — failure here is non-fatal for the API response
-	logCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if logErr := h.store.LogNotification(logCtx, store.NotificationRecord{
-		RequestID:    requestID,
-		Recipient:    req.Recipient,
-		Channel:      req.Channel,
-		Message:      req.Message,
-		Status:       status,
-		ErrorMessage: errMsg,
-	}); logErr != nil {
-		log.Warn("failed to write notification log", "error", logErr)
+		status = "delivered"
+		log.Info("notification delivered", "channel", finalChannel)
 	}
 
 	if sendErr != nil {
 		c.JSON(http.StatusBadGateway, notifyResponse{
 			RequestID: requestID,
 			Status:    status,
-			Channel:   req.Channel,
+			Channel:   finalChannel,
 			Error:     errMsg,
 		})
 		return
@@ -121,7 +169,7 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 	c.JSON(http.StatusOK, notifyResponse{
 		RequestID: requestID,
 		Status:    status,
-		Channel:   req.Channel,
+		Channel:   finalChannel,
 	})
 }
 
