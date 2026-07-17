@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  postgres:
+    build:
+      context: ../
+      dockerfile: dockerfiles/postgres/Dockerfile
+    container_name: cargonex_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - cargonex_network
+
+  go_app:
+    build:
+      context: ../
+      dockerfile: dockerfiles/go/Dockerfile
+    container_name: cargonex_go
+    depends_on:
+      - postgres
+    ports:
+      - "${SERVER_PORT}:${SERVER_PORT}"
+    env_file:
+      - ../dev/.env
+    networks:
+      - cargonex_network
+
+volumes:
+  pgdata:
+
+networks:
+  cargonex_network:
+    name: cargonex_network
+    driver: bridge

@@ -1,6 +1,6 @@
 # RelayHub
 
-> A universal notification delivery API — send via Telegram, Email, SMS, and more through a single endpoint.
+> A universal notification delivery API — send via Discord, Email, SMS, and more through a single endpoint.
 
 RelayHub is a self-hostable, multi-tenant notification platform. Instead of integrating each provider separately, you POST one request to RelayHub and it handles delivery, retries, fallback, and logging across channels.
 
@@ -10,7 +10,7 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 | Feature | Status |
 |---|---|
-| `POST /v1/notify` — send a Telegram message | ✅ |
+| `POST /v1/notify` — send a Discord message | ✅ |
 | `POST /v1/notify` — send an Email with fallback | ✅ |
 | `GET /v1/logs` — view recent delivery history | ✅ |
 | `GET /health` — health check endpoint | ✅ |
@@ -21,33 +21,27 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
-## Getting a free Telegram Bot token
+## Getting a free Discord Webhook URL
 
-You need two things: a **bot token** and your **chat_id**.
+Discord webhooks are free, require no bot token, and work without any approval process.
 
-### Step 1 — Create a bot and get the token
+### Step 1 — Create (or open) a Discord server
 
-1. Open Telegram and search for **@BotFather**
-2. Send `/newbot`
-3. Follow the prompts — choose a name and username for your bot
-4. BotFather will reply with your token, looking like:
+1. Open Discord and click the **+** icon on the left sidebar
+2. Choose **Create My Own** → **For me and my friends** → give it any name
+
+### Step 2 — Create a Webhook on a channel
+
+1. Right-click any text channel (e.g. `#general`) → **Edit Channel**
+2. Go to **Integrations** → **Webhooks** → **New Webhook**
+3. Give it a name (e.g. "RelayHub"), then click **Copy Webhook URL**
+4. The URL will look like:
    ```
-   1234567890:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   https://discord.com/api/webhooks/1234567890/abcdefghijklmnopqrstuvwxyz
    ```
-5. Copy it — this is your `TELEGRAM_BOT_TOKEN`
+5. Paste this as your `recipient` in API requests, or set it as `DISCORD_WEBHOOK_URL` in `.env` to use as a default.
 
-### Step 2 — Get your chat_id
-
-1. Start a conversation with your new bot (search for it in Telegram and click **Start**)
-2. Send any message to the bot (e.g. "hello")
-3. In your browser, open:
-   ```
-   https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
-   ```
-4. Look for `"chat":{"id":XXXXXXX}` in the response — that number is your **chat_id**
-
-> **Tip:** Your chat_id is typically a large positive integer for personal chats (e.g. `987654321`).
-> For group chats it's a negative integer (e.g. `-1001234567890`).
+> **Tip:** You can create multiple webhooks on different channels and route different notifications to each one by passing the webhook URL as `recipient` at request time.
 
 ---
 
@@ -80,11 +74,11 @@ cd relayhub
 # 2. Create your .env from the template
 cp .env.example .env
 
-# 3. Fill in your bot token and Resend key in .env
+# 3. Fill in your Resend key in .env
 #    Open .env and replace:
-#    TELEGRAM_BOT_TOKEN="your_token"
 #    RESEND_API_KEY="re_your_key"
 #    FROM_EMAIL="onboarding@resend.dev"
+#    DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." (optional default)
 
 # 4. Start everything
 docker compose up --build
@@ -107,23 +101,26 @@ docker compose down -v       # stop and delete DB data
 
 Send a notification.
 
-**Request body (Telegram or Email):**
+**Request body (Discord or Email):**
 ```json
 {
-  "recipient": "987654321",
+  "recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
   "message":   "Hello from RelayHub! 🚀",
-  "channel":   "telegram" // or "email"
+  "channel":   "discord"
 }
 ```
 
+> **Note:** For `channel=discord`, `recipient` is the full Discord Webhook URL.
+> For `channel=email`, `recipient` is an email address.
+
 **Request body (Auto Fallback):**
-If channel is "auto", the system will try Telegram first. If it completely fails, it will automatically fall back to Email.
+If channel is `"auto"`, the system will try Discord first (with retries). If it completely fails, it automatically falls back to Email.
 ```json
 {
-  "message":            "Hello from RelayHub! 🚀",
-  "channel":            "auto",
-  "telegram_recipient": "987654321",
-  "email_recipient":    "you@example.com"
+  "message":          "Hello from RelayHub! 🚀",
+  "channel":          "auto",
+  "discord_recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
+  "email_recipient":  "you@example.com"
 }
 ```
 
@@ -132,7 +129,7 @@ If channel is "auto", the system will try Telegram first. If it completely fails
 {
   "request_id": "550e8400-e29b-41d4-a716-446655440000",
   "status":     "delivered",
-  "channel":    "telegram"
+  "channel":    "discord"
 }
 ```
 
@@ -141,8 +138,8 @@ If channel is "auto", the system will try Telegram first. If it completely fails
 {
   "request_id": "550e8400-e29b-41d4-a716-446655440000",
   "status":     "failed",
-  "channel":    "telegram",
-  "error":      "telegram: API error 400: chat not found"
+  "channel":    "discord",
+  "error":      "discord: webhook not found (404) — check the webhook URL"
 }
 ```
 
@@ -160,7 +157,7 @@ Returns recent delivery attempts, newest first.
       "id":            1,
       "request_id":    "550e8400-...",
       "recipient":     "987654321",
-      "channel":       "telegram",
+      "channel":       "discord",
       "message":       "Hello!",
       "status":        "delivered",
       "error_message": "",
@@ -185,13 +182,13 @@ Returns recent delivery attempts, newest first.
 ## Example curl commands
 
 ```bash
-# Send a Telegram message
+# Send a Discord message
 curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
-    "recipient": "YOUR_CHAT_ID",
+    "recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
     "message":   "Hello from RelayHub! 🚀",
-    "channel":   "telegram"
+    "channel":   "discord"
   }' | jq
 
 # Send an Email message
@@ -203,14 +200,14 @@ curl -s -X POST http://localhost:8080/v1/notify \
     "channel":   "email"
   }' | jq
 
-# Use Auto-Fallback (Telegram -> Email)
+# Use Auto-Fallback (Discord -> Email)
 curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -d '{
-    "telegram_recipient": "INVALID_CHAT_ID_TO_FORCE_FALLBACK",
-    "email_recipient":    "you@example.com",
-    "message":            "Fallback test message!",
-    "channel":            "auto"
+    "discord_recipient": "https://discord.com/api/webhooks/INVALID_ID/INVALID_TOKEN",
+    "email_recipient":   "you@example.com",
+    "message":           "Fallback test message!",
+    "channel":           "auto"
   }' | jq
 
 # Send an Idempotent request (prevents duplicate sends)
@@ -218,9 +215,9 @@ curl -s -X POST http://localhost:8080/v1/notify \
   -H "Content-Type: application/json" \
   -H "X-Idempotency-Key: my-unique-key-123" \
   -d '{
-    "recipient": "987654321",
+    "recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
     "message":   "Hello exactly once! 🚀",
-    "channel":   "telegram"
+    "channel":   "discord"
   }' | jq
 
 # View delivery logs
@@ -241,7 +238,8 @@ relayhub/
 │   ├── config/config.go           # Environment variable loader
 │   ├── providers/
 │   │   ├── interface.go           # Sender interface (the only contract core code touches)
-│   │   └── telegram.go            # Telegram Bot API provider
+│   │   ├── discord.go             # Discord Webhook provider
+│   │   └── email.go               # Resend Email provider
 │   ├── handlers/notify.go         # POST /notify + GET /logs HTTP handlers
 │   └── store/store.go             # PostgreSQL store + auto-migration
 ├── Dockerfile                     # Multi-stage build
@@ -254,7 +252,7 @@ relayhub/
 
 ## Roadmap
 
-- **Phase 1** ✅ Core engine — Telegram provider, delivery logs
+- **Phase 1** ✅ Core engine — Discord provider, Email provider, delivery logs, retry, fallback, idempotency
 - **Phase 2** 🔜 Multi-tenancy — API keys, per-tenant rate limiting
 - **Phase 3** 🔜 Templates, scheduled sends, outbound webhooks, Discord + SMTP
 - **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue

@@ -38,12 +38,12 @@ func NewNotifyHandler(senders []providers.Sender, s *store.Store, idem store.Ide
 // ── Request / Response types ──────────────────────────────────────────────────
 
 type notifyRequest struct {
-	Recipient         string `json:"recipient"`
-	TelegramRecipient string `json:"telegram_recipient"`
-	EmailRecipient    string `json:"email_recipient"`
-	Message           string `json:"message" binding:"required"`
-	Channel           string `json:"channel" binding:"required"`
-	IdempotencyKey    string `json:"idempotency_key"`
+	Recipient        string `json:"recipient"`
+	DiscordRecipient string `json:"discord_recipient"`
+	EmailRecipient   string `json:"email_recipient"`
+	Message          string `json:"message" binding:"required"`
+	Channel          string `json:"channel" binding:"required"`
+	IdempotencyKey   string `json:"idempotency_key"`
 }
 
 type notifyResponse struct {
@@ -114,17 +114,17 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 
 	// Validate recipients based on channel
 	if req.Channel == "auto" {
-		if req.TelegramRecipient == "" || req.EmailRecipient == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "auto channel requires both telegram_recipient and email_recipient"})
+		if req.DiscordRecipient == "" || req.EmailRecipient == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "auto channel requires both discord_recipient and email_recipient"})
 			return
 		}
-	} else if req.Channel == "telegram" || req.Channel == "email" {
+	} else if req.Channel == "discord" || req.Channel == "email" {
 		if req.Recipient == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "recipient is required for " + req.Channel})
 			return
 		}
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "unsupported channel: " + req.Channel + " — supported: telegram, email, auto"})
+		c.JSON(http.StatusBadRequest, gin.H{"request_id": requestID, "error": "unsupported channel: " + req.Channel + " — supported: discord, email, auto"})
 		return
 	}
 
@@ -178,13 +178,13 @@ func (h *NotifyHandler) Send(c *gin.Context) {
 	}
 
 	if req.Channel == "auto" {
-		finalChannel = "telegram"
-		_, sendErr = executeProvider("telegram", req.TelegramRecipient)
-		
+		finalChannel = "discord"
+		_, sendErr = executeProvider("discord", req.DiscordRecipient)
+
 		if sendErr != nil {
 			fallbackUsed = true
 			finalChannel = "email"
-			log.Warn("telegram failed completely, falling back to email", "request_id", requestID)
+			log.Warn("discord failed completely, falling back to email", "request_id", requestID)
 			_, sendErr = executeProvider("email", req.EmailRecipient)
 		}
 	} else {
