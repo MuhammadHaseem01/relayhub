@@ -33,12 +33,12 @@ func main() {
 	logger.Info("connected to postgres")
 
 	// Initialize providers
-	telegram := providers.NewTelegramProvider(cfg.TelegramBotToken)
+	discord := providers.NewDiscordProvider(cfg.DiscordWebhookURL)
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
 
 	// Initialize HTTP handlers
 	idemStore := store.NewInMemoryIdempotencyStore()
-	notifyHandler := handlers.NewNotifyHandler([]providers.Sender{telegram, email}, db, idemStore, logger)
+	notifyHandler := handlers.NewNotifyHandler([]providers.Sender{discord, email}, db, idemStore, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
