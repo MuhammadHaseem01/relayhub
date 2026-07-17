@@ -16,9 +16,11 @@ type NotificationRecord struct {
 	Message      string    `json:"message"`
 	Status       string    `json:"status"`
 	ErrorMessage string    `json:"error_message"`
-	Attempts     int       `json:"attempts"`
-	FallbackUsed bool      `json:"fallback_used"`
-	CreatedAt    time.Time `json:"created_at"`
+	Attempts          int       `json:"attempts"`
+	FallbackUsed      bool      `json:"fallback_used"`
+	IdempotencyKey    string    `json:"idempotency_key"`
+	WasCachedResponse bool      `json:"was_cached_response"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 type Store struct {
 	pool *pgxpool.Pool
@@ -54,10 +56,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			channel       TEXT         NOT NULL,
 			message       TEXT         NOT NULL,
 			status        TEXT         NOT NULL,
-			error_message TEXT         NOT NULL DEFAULT '',
-			attempts      INT          NOT NULL DEFAULT 1,
-			fallback_used BOOLEAN      NOT NULL DEFAULT false,
-			created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+			error_message       TEXT         NOT NULL DEFAULT '',
+			attempts            INT          NOT NULL DEFAULT 1,
+			fallback_used       BOOLEAN      NOT NULL DEFAULT false,
+			idempotency_key     TEXT         DEFAULT '',
+			was_cached_response BOOLEAN      NOT NULL DEFAULT false,
+			created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_notifications_request_id
@@ -72,9 +76,9 @@ func (s *Store) migrate(ctx context.Context) error {
 func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notifications
-			(request_id, recipient, channel, message, status, error_message, attempts, fallback_used)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, rec.RequestID, rec.Recipient, rec.Channel, rec.Message, rec.Status, rec.ErrorMessage, rec.Attempts, rec.FallbackUsed)
+			(request_id, recipient, channel, message, status, error_message, attempts, fallback_used, idempotency_key, was_cached_response)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, rec.RequestID, rec.Recipient, rec.Channel, rec.Message, rec.Status, rec.ErrorMessage, rec.Attempts, rec.FallbackUsed, rec.IdempotencyKey, rec.WasCachedResponse)
 	if err != nil {
 		return fmt.Errorf("store: failed to log notification: %w", err)
 	}
@@ -83,7 +87,7 @@ func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) err
 
 func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, request_id, recipient, channel, message, status, error_message, attempts, fallback_used, created_at
+		SELECT id, request_id, recipient, channel, message, status, error_message, attempts, fallback_used, idempotency_key, was_cached_response, created_at
 		FROM notifications
 		ORDER BY created_at DESC
 		LIMIT $1
@@ -98,7 +102,7 @@ func (s *Store) GetLogs(ctx context.Context, limit int) ([]NotificationRecord, e
 		var r NotificationRecord
 		if err := rows.Scan(
 			&r.ID, &r.RequestID, &r.Recipient, &r.Channel,
-			&r.Message, &r.Status, &r.ErrorMessage, &r.Attempts, &r.FallbackUsed, &r.CreatedAt,
+			&r.Message, &r.Status, &r.ErrorMessage, &r.Attempts, &r.FallbackUsed, &r.IdempotencyKey, &r.WasCachedResponse, &r.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("store: row scan error: %w", err)
 		}
