@@ -1,12 +1,12 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
-RUN GOTOOLCHAIN=local go mod download
+RUN go mod download
 
 COPY . .
-RUN GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /relayhub ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /relayhub ./cmd/server
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata
