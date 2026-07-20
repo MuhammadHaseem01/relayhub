@@ -1,33 +1,32 @@
-// Package router wires HTTP routes to the service layer.
-// Handlers are thin: decode request → call service → write response.
-// All business logic lives in the service layer.
 package router
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
+	"relayhub/internal/middleware"
 	"relayhub/internal/service/notify_service"
 	"relayhub/internal/store"
+
+	"github.com/google/uuid"
 )
 
-// Config holds all dependencies injected into the router.
 type Config struct {
 	NotifyService notify_service.NotifyService
 	Store         *store.Store
 	Logger        *slog.Logger
 }
 
-// Server holds references to all services. Handler methods hang off this struct.
 type Server struct {
 	notify notify_service.NotifyService
 	store  *store.Store
 	logger *slog.Logger
 }
 
-// New builds the HTTP router and returns its handler.
 func New(cfg Config) http.Handler {
 	s := &Server{
 		notify: cfg.NotifyService,
@@ -37,29 +36,27 @@ func New(cfg Config) http.Handler {
 	return s.withMiddleware(s.routes())
 }
 
-// routes registers all API routes.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /v1/notify", s.handleSend)
-	mux.HandleFunc("GET /v1/logs", s.handleLogs)
+	mux.HandleFunc("POST /v1/tenants", s.handleRegisterTenant)
+
+	auth := middleware.Auth(s.store)
+	mux.Handle("POST /v1/notify", auth(http.HandlerFunc(s.handleSend)))
+	mux.Handle("GET /v1/logs", auth(http.HandlerFunc(s.handleLogs)))
 
 	return mux
 }
 
-// withMiddleware applies top-level middleware (CORS, trailing-slash trim, request ID).
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Strip trailing slashes
 		if len(r.URL.Path) > 1 && strings.HasSuffix(r.URL.Path, "/") {
 			r.URL.Path = strings.TrimRight(r.URL.Path, "/")
 		}
 
-		// Attach a request-scoped request ID to every response
 		w.Header().Set("X-Request-ID", uuid.New().String())
 
-		// Structured access log
 		s.logger.Info("http",
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -69,18 +66,57 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ── Handlers ─────────────────────────────────────────────────────────────────
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"status": "ok", "service": "relayhub"})
 }
 
-// notifyRequest mirrors the public API contract for POST /v1/notify.
+type registerTenantRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleRegisterTenant(w http.ResponseWriter, r *http.Request) {
+	var req registerTenantRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	apiKey, err := generateAPIKey()
+	if err != nil {
+		s.logger.Error("failed to generate API key", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to generate API key")
+		return
+	}
+
+	tenant, err := s.store.CreateTenant(r.Context(), req.Name, apiKey)
+	if err != nil {
+		s.logger.Error("failed to create tenant", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create tenant")
+		return
+	}
+
+	s.logger.Info("tenant registered", "tenant_id", tenant.ID, "name", tenant.Name)
+	writeCreated(w, map[string]string{
+		"tenant_id": tenant.ID,
+		"api_key":   tenant.APIKey,
+	})
+}
+
+func generateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto/rand read: %w", err)
+	}
+	return "rh_" + hex.EncodeToString(b), nil
+}
+
 type notifyRequest struct {
-	// For channel="discord" or channel="email" — pass a single recipient.
 	Recipient string `json:"recipient"`
 
-	// For channel="auto" — pass both so Discord can fall back to Email.
 	DiscordRecipient string `json:"discord_recipient"`
 	EmailRecipient   string `json:"email_recipient"`
 
@@ -90,13 +126,18 @@ type notifyRequest struct {
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	var req notifyRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 
-	// Basic validation
 	if req.Message == "" {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
@@ -106,12 +147,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Header takes precedence if body field is empty
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = r.Header.Get("X-Idempotency-Key")
 	}
-
-	// Per-channel recipient validation
 	switch req.Channel {
 	case "auto":
 		if req.DiscordRecipient == "" || req.EmailRecipient == "" {
@@ -129,6 +167,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := s.notify.Send(r.Context(), notify_service.Request{
+		TenantID:         tenant.ID,
 		Recipient:        req.Recipient,
 		DiscordRecipient: req.DiscordRecipient,
 		EmailRecipient:   req.EmailRecipient,
@@ -137,7 +176,6 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey:   req.IdempotencyKey,
 	})
 
-	// Idempotency conflict
 	if err != nil && err.Error() == "idempotency: a request with this key is currently being processed" {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -155,12 +193,18 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	limit := queryInt(r, "limit", 50)
 	if limit > 200 {
 		limit = 200
 	}
 
-	logs, err := s.store.GetLogs(r.Context(), limit)
+	logs, err := s.store.GetLogs(r.Context(), tenant.ID, limit)
 	if err != nil {
 		s.logger.Error("failed to fetch logs", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch logs")
