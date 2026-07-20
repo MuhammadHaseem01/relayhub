@@ -1,6 +1,3 @@
-// Package notify_service_impl implements notify_service.NotifyService.
-// It owns all delivery logic: retry with exponential backoff, channel
-// fallback, idempotency caching, and PostgreSQL logging.
 package notify_service_impl
 
 import (
@@ -11,16 +8,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"relayhub/internal/providers"
 	"relayhub/internal/service/notify_service"
 	"relayhub/internal/store"
+
+	"github.com/google/uuid"
 )
 
-// RetryFunc matches the signature of retry.WithRetry so it can be injected.
 type RetryFunc func(fn func() error, maxAttempts int, logger *slog.Logger) (int, error)
 
-// Params holds all dependencies for the service.
 type Params struct {
 	Providers   []providers.Sender
 	Store       *store.Store
@@ -39,7 +35,6 @@ type service struct {
 	retry       RetryFunc
 }
 
-// New creates a new NotifyService with all dependencies injected.
 func New(p Params) notify_service.NotifyService {
 	m := make(map[string]providers.Sender, len(p.Providers))
 	for _, pr := range p.Providers {
@@ -55,13 +50,10 @@ func New(p Params) notify_service.NotifyService {
 	}
 }
 
-// Send is the single public method. It handles idempotency, retry, fallback,
-// and logging so callers never need to know about those concerns.
 func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_service.Response, error) {
 	requestID := uuid.New().String()
 	log := s.logger.With("request_id", requestID)
 
-	// ── Idempotency check ──────────────────────────────────────────────────
 	if req.IdempotencyKey != "" {
 		record, exists := s.idemStore.GetOrCreate(req.IdempotencyKey)
 		if exists {
@@ -74,18 +66,17 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 			_ = json.Unmarshal(record.Body, &cached)
 			cached.WasCached = true
 
-			s.logToDB(ctx, requestID, req.Recipient, req.Channel, req.Message,
+			s.logToDB(ctx, req.TenantID, requestID, req.Recipient, req.Channel, req.Message,
 				"delivered (cached)", "", 0, false, req.IdempotencyKey, true)
 
 			return cached, nil
 		}
 	}
 
-	// ── Delivery ───────────────────────────────────────────────────────────
 	var (
-		sendErr      error
-		finalChannel string
-		fallbackUsed bool
+		sendErr       error
+		finalChannel  string
+		fallbackUsed  bool
 		totalAttempts int
 	)
 
@@ -101,14 +92,13 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 
 		totalAttempts += attempts
 
-		// Log per-provider attempt to DB
 		logStatus := "delivered"
 		logErr := ""
 		if err != nil {
 			logStatus = "failed"
 			logErr = err.Error()
 		}
-		s.logToDB(ctx, requestID, recipient, channelName, req.Message,
+		s.logToDB(ctx, req.TenantID, requestID, recipient, channelName, req.Message,
 			logStatus, logErr, attempts, fallbackUsed, req.IdempotencyKey, false)
 
 		return err
@@ -129,7 +119,6 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 		sendErr = execute(req.Channel, req.Recipient)
 	}
 
-	// ── Build response ─────────────────────────────────────────────────────
 	resp := notify_service.Response{
 		RequestID: requestID,
 		Channel:   finalChannel,
@@ -143,7 +132,6 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 		log.Info("notification delivered", "channel", finalChannel)
 	}
 
-	// ── Save to idempotency store ──────────────────────────────────────────
 	if req.IdempotencyKey != "" {
 		body, _ := json.Marshal(resp)
 		statusCode := http.StatusOK
@@ -156,15 +144,15 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 	return resp, sendErr
 }
 
-// logToDB persists a delivery attempt record. Errors are non-fatal.
 func (s *service) logToDB(
 	ctx context.Context,
-	requestID, recipient, channel, message, status, errMsg string,
+	tenantID, requestID, recipient, channel, message, status, errMsg string,
 	attempts int, fallbackUsed bool, idempotencyKey string, wasCached bool,
 ) {
 	dbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := s.store.LogNotification(dbCtx, store.NotificationRecord{
+		TenantID:          tenantID,
 		RequestID:         requestID,
 		Recipient:         recipient,
 		Channel:           channel,
