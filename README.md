@@ -6,7 +6,7 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
-## Phase 2 — Multi-tenancy (current)
+## Phase 2 — Multi-tenancy (complete ✅)
 
 | Feature | Status |
 |---|---|
@@ -14,6 +14,8 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 | `X-API-Key` header authentication on all endpoints | ✅ |
 | Per-tenant notification scoping (`tenant_id` on every log) | ✅ |
 | `GET /v1/logs` only shows the authenticated tenant's data | ✅ |
+| Rate limiting — 100 notifications/day on free plan | ✅ |
+| `GET /v1/usage` — real-time usage stats from database | ✅ |
 
 ## Phase 1 — Core engine
 
@@ -253,6 +255,58 @@ Returns your tenant's recent delivery attempts, newest first. Requires `X-API-Ke
 
 ---
 
+### Rate Limiting
+
+The **free plan** allows **100 notifications per rolling 24-hour window** on `POST /v1/notify`.
+
+**Rate limit response (429):**
+```json
+{
+  "success":   false,
+  "error":     "rate limit exceeded — free plan allows 100 notifications per 24-hour rolling window",
+  "limit":     100,
+  "remaining": 0,
+  "resets_at": "2026-07-21T18:00:00Z"
+}
+```
+
+Every allowed response also carries informational headers:
+```
+X-RateLimit-Limit:     100
+X-RateLimit-Remaining: 88
+X-RateLimit-Reset:     2026-07-21T18:00:00Z
+```
+
+> **Note (Phase 2 known simplification):** The in-memory rate-limit counter resets on process restart. The `GET /v1/usage` endpoint queries the database and is the source of truth for accurate counts. The in-memory limiter is the real-time enforcement layer for low-latency checking.
+
+> Validation errors (400 Bad Request) do **not** consume a slot — only requests that reach the provider count against your limit.
+
+---
+
+### `GET /v1/usage`
+
+Returns real-time usage statistics for the authenticated tenant, sourced directly from the database. Requires `X-API-Key`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+    "plan":      "free",
+    "limit":     100,
+    "used":      12,
+    "remaining": 88,
+    "resets_at": "2026-07-21T18:00:00Z"
+  }
+}
+```
+
+- `used` — notifications sent in the last 24 hours (from DB)
+- `remaining` — slots left in the current window
+- `resets_at` — when the oldest notification in the current window expires (i.e. when `used` will drop by 1)
+
+---
+
 ### `GET /health`
 
 ```json
@@ -318,8 +372,19 @@ curl -s -X POST http://localhost:8080/v1/notify \
 curl -s http://localhost:8080/v1/logs \
   -H "X-API-Key: $API_KEY" | jq
 
+# Check your usage stats (DB-backed, survives restarts)
+curl -s http://localhost:8080/v1/usage \
+  -H "X-API-Key: $API_KEY" | jq
+
 # Health check (no auth needed)
 curl -s http://localhost:8080/health
+
+# Confirm 429 when over the rate limit (free plan: 100/day)
+# X-RateLimit-* headers are present on every /v1/notify response
+curl -s -i -X POST http://localhost:8080/v1/notify \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"recipient":"you@example.com","message":"test","channel":"email"}' | head -6
 
 # Confirm 401 for missing key
 curl -s http://localhost:8080/v1/logs | jq
@@ -339,7 +404,8 @@ relayhub/
 ├── internal/
 │   ├── config/config.go                        # Environment variable loader
 │   ├── middleware/
-│   │   └── auth.go                             # X-API-Key auth middleware + context helpers
+│   │   ├── auth.go                             # X-API-Key auth middleware + context helpers
+│   │   └── ratelimit.go                        # In-memory rolling-window rate limiter
 │   ├── providers/
 │   │   ├── interface.go                        # Sender interface (the only contract core code touches)
 │   │   ├── discord.go                          # Discord Webhook provider
@@ -359,8 +425,7 @@ relayhub/
 ## Roadmap
 
 - **Phase 1** ✅ Core engine — Discord provider, Email provider, delivery logs, retry, fallback, idempotency
-- **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation
-- **Phase 3** 🔜 Rate limiting, usage stats, and quotas per plan
-- **Phase 4** 🔜 Templates, scheduled sends, outbound webhooks, Discord + SMTP
-- **Phase 5** 🔜 Redis Streams queue, worker pool, dead-letter queue
-- **Phase 6** 🔜 React dashboard — logs, usage charts, template editor
+- **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
+- **Phase 3** 🔜 Templates, scheduled sends, outbound webhooks, Discord + SMTP
+- **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue
+- **Phase 5** 🔜 React dashboard — logs, usage charts, template editor
