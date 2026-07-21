@@ -185,6 +185,30 @@ func (s *Store) GetLogs(ctx context.Context, tenantID string, limit int) ([]Noti
 	return records, rows.Err()
 }
 
+type TenantUsage struct {
+	Count    int
+	OldestAt *time.Time
+}
+
+func (s *Store) GetTenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
+	if tenantID == "" {
+		return TenantUsage{}, nil
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	var usage TenantUsage
+	var oldest *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*), MIN(created_at)
+		FROM notifications
+		WHERE tenant_id = $1 AND created_at >= $2
+	`, tenantID, cutoff).Scan(&usage.Count, &oldest)
+	if err != nil {
+		return TenantUsage{}, fmt.Errorf("store: failed to get tenant usage: %w", err)
+	}
+	usage.OldestAt = oldest
+	return usage, nil
+}
+
 func (s *Store) Close() {
 	s.pool.Close()
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"relayhub/internal/middleware"
 	"relayhub/internal/service/notify_service"
@@ -22,16 +23,18 @@ type Config struct {
 }
 
 type Server struct {
-	notify notify_service.NotifyService
-	store  *store.Store
-	logger *slog.Logger
+	notify      notify_service.NotifyService
+	store       *store.Store
+	logger      *slog.Logger
+	rateLimiter *middleware.InMemoryRateLimiter
 }
 
 func New(cfg Config) http.Handler {
 	s := &Server{
-		notify: cfg.NotifyService,
-		store:  cfg.Store,
-		logger: cfg.Logger,
+		notify:      cfg.NotifyService,
+		store:       cfg.Store,
+		logger:      cfg.Logger,
+		rateLimiter: middleware.NewInMemoryRateLimiter(24 * time.Hour),
 	}
 	return s.withMiddleware(s.routes())
 }
@@ -43,8 +46,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/tenants", s.handleRegisterTenant)
 
 	auth := middleware.Auth(s.store)
-	mux.Handle("POST /v1/notify", auth(http.HandlerFunc(s.handleSend)))
+	rl := middleware.RateLimit(s.rateLimiter)
+
+	mux.Handle("POST /v1/notify", auth(rl(http.HandlerFunc(s.handleSend))))
+
 	mux.Handle("GET /v1/logs", auth(http.HandlerFunc(s.handleLogs)))
+	mux.Handle("GET /v1/usage", auth(http.HandlerFunc(s.handleUsage)))
 
 	return mux
 }
@@ -214,5 +221,49 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{
 		"count": len(logs),
 		"logs":  logs,
+	})
+}
+
+// ── GET /v1/usage ─────────────────────────────────────────────────────────────
+
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	planLimit := middleware.LimitForPlan(tenant.Plan)
+
+	// Query the DB for accurate counts — this reflects real usage even after
+	// a process restart when the in-memory limiter counter has been lost.
+	usage, err := s.store.GetTenantUsage(r.Context(), tenant.ID)
+	if err != nil {
+		s.logger.Error("failed to get tenant usage", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get usage stats")
+		return
+	}
+
+	remaining := planLimit - usage.Count
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	// resets_at: when the oldest notification in the window expires.
+	// If no notifications yet, report 24h from now.
+	var resetsAt string
+	if usage.OldestAt != nil {
+		resetsAt = usage.OldestAt.Add(24 * time.Hour).UTC().Format("2006-01-02T15:04:05Z")
+	} else {
+		resetsAt = time.Now().Add(24 * time.Hour).UTC().Format("2006-01-02T15:04:05Z")
+	}
+
+	writeOK(w, map[string]any{
+		"tenant_id": tenant.ID,
+		"plan":      tenant.Plan,
+		"limit":     planLimit,
+		"used":      usage.Count,
+		"remaining": remaining,
+		"resets_at": resetsAt,
 	})
 }
