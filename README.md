@@ -6,6 +6,19 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 3 — Templates (Step 1 complete ✅)
+
+| Feature | Status |
+|---|---|
+| `POST /v1/templates` — create a reusable message template | ✅ |
+| `GET /v1/templates` — list all templates for your tenant | ✅ |
+| `GET /v1/templates/:name` — fetch a single template | ✅ |
+| `PUT /v1/templates/:name` — update a template's body | ✅ |
+| `DELETE /v1/templates/:name` — delete a template | ✅ |
+| `POST /v1/notify` with `template` + `variables` — substitutes `{{placeholders}}` | ✅ |
+| Missing-variable 400 — lists exactly which variables are absent | ✅ |
+| Tenant isolation — templates are strictly scoped per tenant | ✅ |
+
 ## Phase 2 — Multi-tenancy (complete ✅)
 
 | Feature | Status |
@@ -182,6 +195,10 @@ X-API-Key: rh_your_api_key_here
 
 Send a notification. Requires `X-API-Key`.
 
+You can supply the message body in two ways — **plain message** or **template**. You must use exactly one; supplying both returns 400.
+
+#### Option A — plain message
+
 **Request body (Discord or Email):**
 ```json
 {
@@ -205,12 +222,43 @@ If channel is `"auto"`, the system will try Discord first (with retries). If it 
 }
 ```
 
+#### Option B — template + variables
+
+Pass the name of a previously created template and a `variables` map. All `{{placeholders}}` in the template body are substituted before delivery.
+
+```json
+{
+  "channel":   "email",
+  "recipient": "ali@example.com",
+  "template":  "order_shipped",
+  "variables": {
+    "customer_name": "Ali",
+    "order_id":      "4471"
+  }
+}
+```
+
+**Missing variable response (400):**
+If a placeholder in the template has no matching key in `variables`, the request is rejected and every missing key is listed:
+```json
+{
+  "success":           false,
+  "error":             "template is missing required variables",
+  "missing_variables": ["order_id"]
+}
+```
+
+**Both `message` and `template` provided (400):**
+```json
+{ "success": false, "error": "provide either 'message' or 'template', not both" }
+```
+
 **Success response (201):**
 ```json
 {
   "request_id": "550e8400-e29b-41d4-a716-446655440000",
   "status":     "delivered",
-  "channel":    "discord"
+  "channel":    "email"
 }
 ```
 
@@ -223,6 +271,100 @@ If channel is `"auto"`, the system will try Discord first (with retries). If it 
   "error":      "discord: webhook not found (404) — check the webhook URL"
 }
 ```
+
+---
+
+### Template API
+
+All template endpoints require `X-API-Key`. Templates are strictly scoped to the authenticated tenant.
+
+**Validation rules:**
+- `name` — alphanumeric + underscores only, max 64 characters (`^[a-zA-Z0-9_]{1,64}$`)
+- `body` — non-empty, max 4 000 characters
+
+---
+
+#### `POST /v1/templates`
+
+Create a new reusable template.
+
+```json
+{ "name": "order_shipped", "body": "Hi {{customer_name}}, your order {{order_id}} has shipped!" }
+```
+
+**Success (201):**
+```json
+{
+  "success": true,
+  "data": {
+    "id":         "550e8400-e29b-41d4-a716-446655440000",
+    "tenant_id":  "7a3f9c00-...",
+    "name":       "order_shipped",
+    "body":       "Hi {{customer_name}}, your order {{order_id}} has shipped!",
+    "created_at": "2026-07-22T17:00:00Z",
+    "updated_at": "2026-07-22T17:00:00Z"
+  }
+}
+```
+
+**Duplicate name (409):**
+```json
+{ "success": false, "error": "a template named \"order_shipped\" already exists" }
+```
+
+---
+
+#### `GET /v1/templates`
+
+List all templates for the authenticated tenant, sorted alphabetically by name.
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "templates": [
+      { "id": "...", "name": "order_shipped", "body": "...", "created_at": "...", "updated_at": "..." },
+      { "id": "...", "name": "welcome_email", "body": "...", "created_at": "...", "updated_at": "..." }
+    ]
+  }
+}
+```
+
+---
+
+#### `GET /v1/templates/:name`
+
+Fetch a single template by name.
+
+**Success (200):** returns the same shape as the single `data` object above.
+
+**Not found (404):**
+```json
+{ "success": false, "error": "template not found: order_shipped" }
+```
+
+---
+
+#### `PUT /v1/templates/:name`
+
+Replace the body of an existing template.
+
+```json
+{ "body": "Hi {{customer_name}}, order {{order_id}} is on its way!" }
+```
+
+**Success (200):** returns the updated template object.
+**Not found (404):** same shape as GET.
+
+---
+
+#### `DELETE /v1/templates/:name`
+
+Permanently delete a template.
+
+**Success (204):** empty body.
+**Not found (404):** `{ "success": false, "error": "template not found: order_shipped" }`
 
 ---
 
@@ -413,7 +555,9 @@ relayhub/
 │   ├── router/router.go                        # HTTP routes + handler methods
 │   ├── service/notify_service/                 # NotifyService interface + Request/Response types
 │   │   └── notify_service_impl/                # Retry, fallback, idempotency, DB logging
-│   └── store/store.go                          # PostgreSQL store — tenants + notifications
+│   └── store/
+│       ├── store.go                            # PostgreSQL store — tenants, notifications, templates
+│       └── template.go                         # SubstituteVars() — {{placeholder}} substitution engine
 ├── Dockerfile                                  # Multi-stage build
 ├── docker-compose.yml                          # App + Postgres
 ├── .env.example                                # Config template
@@ -426,6 +570,7 @@ relayhub/
 
 - **Phase 1** ✅ Core engine — Discord provider, Email provider, delivery logs, retry, fallback, idempotency
 - **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
-- **Phase 3** 🔜 Templates, scheduled sends, outbound webhooks, Discord + SMTP
+- **Phase 3 Step 1** ✅ Message templates — CRUD endpoints, `{{variable}}` substitution, tenant isolation
+- **Phase 3 Step 2** 🔜 Scheduled sends
 - **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue
 - **Phase 5** 🔜 React dashboard — logs, usage charts, template editor
