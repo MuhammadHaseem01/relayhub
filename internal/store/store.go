@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrDuplicateTemplate = errors.New("store: template name already exists for this tenant")
+var ErrTemplateNotFound = errors.New("store: template not found")
 
 type TenantRecord struct {
 	ID        string    `json:"id"`
@@ -16,6 +20,15 @@ type TenantRecord struct {
 	APIKey    string    `json:"api_key"`
 	Plan      string    `json:"plan"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type TemplateRecord struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	Name      string    `json:"name"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type NotificationRecord struct {
@@ -104,8 +117,124 @@ func (s *Store) migrate(ctx context.Context) error {
 
 		CREATE INDEX IF NOT EXISTS idx_notifications_tenant_id
 			ON notifications (tenant_id);
+
+		-- ── Templates ──────────────────────────────────────────────────────────
+		CREATE TABLE IF NOT EXISTS templates (
+			id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			tenant_id  UUID        NOT NULL REFERENCES tenants(id),
+			name       TEXT        NOT NULL,
+			body       TEXT        NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_tenant_name
+			ON templates (tenant_id, name);
 	`)
 	return err
+}
+
+func (s *Store) CreateTemplate(ctx context.Context, tenantID, name, body string) (TemplateRecord, error) {
+	var rec TemplateRecord
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO templates (tenant_id, name, body)
+		VALUES ($1, $2, $3)
+		RETURNING id, tenant_id, name, body, created_at, updated_at
+	`, tenantID, name, body).Scan(
+		&rec.ID, &rec.TenantID, &rec.Name, &rec.Body, &rec.CreatedAt, &rec.UpdatedAt,
+	)
+	if err != nil {
+		if isDuplicateKeyError(err) {
+			return TemplateRecord{}, ErrDuplicateTemplate
+		}
+		return TemplateRecord{}, fmt.Errorf("store: failed to create template: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) GetTemplate(ctx context.Context, tenantID, name string) (TemplateRecord, error) {
+	var rec TemplateRecord
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, name, body, created_at, updated_at
+		FROM templates
+		WHERE tenant_id = $1 AND name = $2
+	`, tenantID, name).Scan(
+		&rec.ID, &rec.TenantID, &rec.Name, &rec.Body, &rec.CreatedAt, &rec.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TemplateRecord{}, ErrTemplateNotFound
+		}
+		return TemplateRecord{}, fmt.Errorf("store: failed to get template: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) ListTemplates(ctx context.Context, tenantID string) ([]TemplateRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, name, body, created_at, updated_at
+		FROM templates
+		WHERE tenant_id = $1
+		ORDER BY name ASC
+	`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("store: failed to list templates: %w", err)
+	}
+	defer rows.Close()
+
+	var records []TemplateRecord
+	for rows.Next() {
+		var r TemplateRecord
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Body, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: template row scan error: %w", err)
+		}
+		records = append(records, r)
+	}
+	if records == nil {
+		records = []TemplateRecord{}
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) UpdateTemplate(ctx context.Context, tenantID, name, body string) (TemplateRecord, error) {
+	var rec TemplateRecord
+	err := s.pool.QueryRow(ctx, `
+		UPDATE templates
+		SET body = $3, updated_at = NOW()
+		WHERE tenant_id = $1 AND name = $2
+		RETURNING id, tenant_id, name, body, created_at, updated_at
+	`, tenantID, name, body).Scan(
+		&rec.ID, &rec.TenantID, &rec.Name, &rec.Body, &rec.CreatedAt, &rec.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TemplateRecord{}, ErrTemplateNotFound
+		}
+		return TemplateRecord{}, fmt.Errorf("store: failed to update template: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) DeleteTemplate(ctx context.Context, tenantID, name string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM templates
+		WHERE tenant_id = $1 AND name = $2
+	`, tenantID, name)
+	if err != nil {
+		return fmt.Errorf("store: failed to delete template: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrTemplateNotFound
+	}
+	return nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "23505") ||
+		strings.Contains(err.Error(), "duplicate key")
 }
 
 func (s *Store) CreateTenant(ctx context.Context, name, apiKey string) (TenantRecord, error) {
