@@ -17,6 +17,7 @@ import (
 	"relayhub/internal/scheduler"
 	"relayhub/internal/service/notify_service/notify_service_impl"
 	"relayhub/internal/store"
+	"relayhub/internal/webhook"
 )
 
 func Start(cfg *config.Config, logger *slog.Logger) error {
@@ -33,6 +34,13 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
 	allProviders := []providers.Sender{discord, email}
 
+	whDispatcher := webhook.New(webhook.Params{
+		Store:       db,
+		Retry:       retry.WithRetry,
+		MaxAttempts: 3,
+		Logger:      logger,
+	})
+
 	notifySvc := notify_service_impl.New(notify_service_impl.Params{
 		Providers:   allProviders,
 		Store:       db,
@@ -40,12 +48,14 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		Logger:      logger,
 		MaxAttempts: 3,
 		Retry:       retry.WithRetry,
+		Dispatcher:  whDispatcher,
 	})
 
 	r := router.New(router.Config{
 		NotifyService: notifySvc,
 		Store:         db,
 		Logger:        logger,
+		Dispatcher:    whDispatcher,
 	})
 
 	srv := &http.Server{
@@ -64,6 +74,7 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		MaxAttempts: 3,
 		Interval:    30 * time.Second,
 		Logger:      logger,
+		Dispatcher:  whDispatcher,
 	})
 	go sched.Run(schedCtx)
 
