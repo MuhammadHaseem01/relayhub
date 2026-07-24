@@ -8,6 +8,7 @@ import (
 
 	"relayhub/internal/providers"
 	"relayhub/internal/store"
+	"relayhub/internal/webhook"
 )
 
 type RetryFunc func(fn func() error, maxAttempts int, logger *slog.Logger) (int, error)
@@ -19,6 +20,7 @@ type Scheduler struct {
 	maxAttempts int
 	interval    time.Duration
 	logger      *slog.Logger
+	dispatcher  *webhook.Dispatcher
 }
 
 type Params struct {
@@ -28,6 +30,7 @@ type Params struct {
 	MaxAttempts int
 	Interval    time.Duration
 	Logger      *slog.Logger
+	Dispatcher  *webhook.Dispatcher
 }
 
 func New(p Params) *Scheduler {
@@ -46,6 +49,7 @@ func New(p Params) *Scheduler {
 		maxAttempts: p.MaxAttempts,
 		interval:    interval,
 		logger:      p.Logger,
+		dispatcher:  p.Dispatcher,
 	}
 }
 
@@ -90,6 +94,7 @@ func (s *Scheduler) dispatch(ctx context.Context, rec store.NotificationRecord) 
 		finalErr      = ""
 		fallbackUsed  = false
 		totalAttempts int
+		finalChannel  = rec.Channel
 	)
 
 	execute := func(channelName, recipient string) error {
@@ -107,9 +112,11 @@ func (s *Scheduler) dispatch(ctx context.Context, rec store.NotificationRecord) 
 	var sendErr error
 	switch rec.Channel {
 	case "auto":
+		finalChannel = "discord"
 		sendErr = execute("discord", rec.DiscordRecipient)
 		if sendErr != nil {
 			fallbackUsed = true
+			finalChannel = "email"
 			log.Warn("discord failed, falling back to email", "error", sendErr)
 			sendErr = execute("email", rec.EmailRecipient)
 		}
@@ -129,5 +136,30 @@ func (s *Scheduler) dispatch(ctx context.Context, rec store.NotificationRecord) 
 		ctx, rec.RequestID, finalStatus, finalErr, totalAttempts, fallbackUsed,
 	); err != nil {
 		log.Error("scheduler: failed to update notification status", "error", err)
+	}
+
+	if s.dispatcher != nil {
+		tenant, err := s.store.GetTenantByID(ctx, rec.TenantID)
+		if err != nil {
+			log.Warn("scheduler: failed to load tenant for webhook", "error", err)
+		} else if tenant.WebhookURL != "" {
+			event := "notification.delivered"
+			if sendErr != nil {
+				event = "notification.failed"
+			}
+			s.dispatcher.FireAsync(
+				tenant.ID,
+				tenant.WebhookURL,
+				tenant.WebhookSecret,
+				webhook.EventPayload{
+					Event:        event,
+					RequestID:    rec.RequestID,
+					ChannelUsed:  finalChannel,
+					FallbackUsed: fallbackUsed,
+					Attempts:     totalAttempts,
+					Timestamp:    time.Now().UTC(),
+				},
+			)
+		}
 	}
 }
