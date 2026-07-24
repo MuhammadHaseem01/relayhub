@@ -14,6 +14,7 @@ import (
 	"relayhub/internal/middleware"
 	"relayhub/internal/service/notify_service"
 	"relayhub/internal/store"
+	"relayhub/internal/webhook"
 
 	"github.com/google/uuid"
 )
@@ -24,6 +25,7 @@ type Config struct {
 	NotifyService notify_service.NotifyService
 	Store         *store.Store
 	Logger        *slog.Logger
+	Dispatcher    *webhook.Dispatcher
 }
 
 type Server struct {
@@ -31,6 +33,7 @@ type Server struct {
 	store       *store.Store
 	logger      *slog.Logger
 	rateLimiter *middleware.InMemoryRateLimiter
+	dispatcher  *webhook.Dispatcher
 }
 
 func New(cfg Config) http.Handler {
@@ -39,6 +42,7 @@ func New(cfg Config) http.Handler {
 		store:       cfg.Store,
 		logger:      cfg.Logger,
 		rateLimiter: middleware.NewInMemoryRateLimiter(24 * time.Hour),
+		dispatcher:  cfg.Dispatcher,
 	}
 	return s.withMiddleware(s.routes())
 }
@@ -64,6 +68,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /v1/templates/{name}", auth(http.HandlerFunc(s.handleGetTemplate)))
 	mux.Handle("PUT /v1/templates/{name}", auth(http.HandlerFunc(s.handleUpdateTemplate)))
 	mux.Handle("DELETE /v1/templates/{name}", auth(http.HandlerFunc(s.handleDeleteTemplate)))
+
+	mux.Handle("PUT /v1/webhook", auth(http.HandlerFunc(s.handleSetWebhook)))
+	mux.Handle("DELETE /v1/webhook", auth(http.HandlerFunc(s.handleDeleteWebhook)))
+	mux.Handle("GET /v1/webhook/deliveries", auth(http.HandlerFunc(s.handleGetWebhookDeliveries)))
 
 	return mux
 }
@@ -269,13 +277,15 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := s.notify.Send(r.Context(), notify_service.Request{
-		TenantID:         tenant.ID,
-		Recipient:        req.Recipient,
-		DiscordRecipient: req.DiscordRecipient,
-		EmailRecipient:   req.EmailRecipient,
-		Message:          req.Message,
-		Channel:          req.Channel,
-		IdempotencyKey:   req.IdempotencyKey,
+		TenantID:            tenant.ID,
+		Recipient:           req.Recipient,
+		DiscordRecipient:    req.DiscordRecipient,
+		EmailRecipient:      req.EmailRecipient,
+		Message:             req.Message,
+		Channel:             req.Channel,
+		IdempotencyKey:      req.IdempotencyKey,
+		TenantWebhookURL:    tenant.WebhookURL,
+		TenantWebhookSecret: tenant.WebhookSecret,
 	})
 
 	if err != nil && err.Error() == "idempotency: a request with this key is currently being processed" {
@@ -554,5 +564,96 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		"used":      usage.Count,
 		"remaining": remaining,
 		"resets_at": resetsAt,
+	})
+}
+
+type setWebhookRequest struct {
+	WebhookURL string `json:"webhook_url"`
+}
+
+func (s *Server) handleSetWebhook(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req setWebhookRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.WebhookURL == "" {
+		writeError(w, http.StatusBadRequest, "webhook_url is required")
+		return
+	}
+	if !strings.HasPrefix(req.WebhookURL, "https://") {
+		writeError(w, http.StatusBadRequest, "webhook_url must use HTTPS")
+		return
+	}
+
+	secret := tenant.WebhookSecret
+	if secret == "" {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			s.logger.Error("failed to generate webhook secret", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to generate webhook secret")
+			return
+		}
+		secret = hex.EncodeToString(b)
+	}
+
+	if err := s.store.SetTenantWebhook(r.Context(), tenant.ID, req.WebhookURL, secret); err != nil {
+		s.logger.Error("failed to set tenant webhook", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to configure webhook")
+		return
+	}
+
+	s.logger.Info("webhook configured", "tenant_id", tenant.ID, "url", req.WebhookURL)
+	writeOK(w, map[string]string{
+		"webhook_url":    req.WebhookURL,
+		"webhook_secret": secret,
+	})
+}
+
+func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := s.store.ClearTenantWebhook(r.Context(), tenant.ID); err != nil {
+		s.logger.Error("failed to clear tenant webhook", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to remove webhook")
+		return
+	}
+
+	s.logger.Info("webhook removed", "tenant_id", tenant.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetWebhookDeliveries(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	limit := queryInt(r, "limit", 50)
+	if limit > 200 {
+		limit = 200
+	}
+
+	deliveries, err := s.store.GetWebhookDeliveries(r.Context(), tenant.ID, limit)
+	if err != nil {
+		s.logger.Error("failed to get webhook deliveries", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch webhook deliveries")
+		return
+	}
+
+	writeOK(w, map[string]any{
+		"count":      len(deliveries),
+		"deliveries": deliveries,
 	})
 }

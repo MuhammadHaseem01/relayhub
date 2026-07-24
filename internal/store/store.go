@@ -15,13 +15,26 @@ var ErrDuplicateTemplate = errors.New("store: template name already exists for t
 var ErrTemplateNotFound = errors.New("store: template not found")
 var ErrNotificationNotFound = errors.New("store: notification not found")
 var ErrNotificationAlreadySent = errors.New("store: notification already sent or cancelled")
+var ErrTenantNotFound = errors.New("store: tenant not found")
 
 type TenantRecord struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	APIKey    string    `json:"api_key"`
-	Plan      string    `json:"plan"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	APIKey        string    `json:"api_key"`
+	Plan          string    `json:"plan"`
+	WebhookURL    string    `json:"webhook_url,omitempty"`
+	WebhookSecret string    `json:"-"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+type WebhookDeliveryRecord struct {
+	ID                    int64     `json:"id"`
+	TenantID              string    `json:"tenant_id"`
+	NotificationRequestID string    `json:"notification_request_id"`
+	StatusCode            int       `json:"status_code"`
+	Attempt               int       `json:"attempt"`
+	Success               bool      `json:"success"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type TemplateRecord struct {
@@ -146,6 +159,25 @@ func (s *Store) migrate(ctx context.Context) error {
 
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_tenant_name
 			ON templates (tenant_id, name);
+
+		-- ── Webhook columns (Phase 3 Step 3) ────────────────────────────────────
+		ALTER TABLE tenants
+			ADD COLUMN IF NOT EXISTS webhook_url    TEXT NULL,
+			ADD COLUMN IF NOT EXISTS webhook_secret TEXT NULL;
+
+		-- ── Webhook delivery audit log ───────────────────────────────────────────
+		CREATE TABLE IF NOT EXISTS webhook_deliveries (
+			id                      BIGSERIAL    PRIMARY KEY,
+			tenant_id               UUID         NOT NULL REFERENCES tenants(id),
+			notification_request_id TEXT         NOT NULL,
+			status_code             INT          NOT NULL DEFAULT 0,
+			attempt                 INT          NOT NULL DEFAULT 1,
+			success                 BOOLEAN      NOT NULL DEFAULT false,
+			created_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant_id
+			ON webhook_deliveries (tenant_id, created_at DESC);
 	`)
 	return err
 }
@@ -258,8 +290,12 @@ func (s *Store) CreateTenant(ctx context.Context, name, apiKey string) (TenantRe
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO tenants (name, api_key)
 		VALUES ($1, $2)
-		RETURNING id, name, api_key, plan, created_at
-	`, name, apiKey).Scan(&rec.ID, &rec.Name, &rec.APIKey, &rec.Plan, &rec.CreatedAt)
+		RETURNING id, name, api_key, plan,
+		          COALESCE(webhook_url, ''), COALESCE(webhook_secret, ''), created_at
+	`, name, apiKey).Scan(
+		&rec.ID, &rec.Name, &rec.APIKey, &rec.Plan,
+		&rec.WebhookURL, &rec.WebhookSecret, &rec.CreatedAt,
+	)
 	if err != nil {
 		return TenantRecord{}, fmt.Errorf("store: failed to create tenant: %w", err)
 	}
@@ -269,10 +305,14 @@ func (s *Store) CreateTenant(ctx context.Context, name, apiKey string) (TenantRe
 func (s *Store) GetTenantByAPIKey(ctx context.Context, apiKey string) (TenantRecord, error) {
 	var rec TenantRecord
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, api_key, plan, created_at
+		SELECT id, name, api_key, plan,
+		       COALESCE(webhook_url, ''), COALESCE(webhook_secret, ''), created_at
 		FROM tenants
 		WHERE api_key = $1
-	`, apiKey).Scan(&rec.ID, &rec.Name, &rec.APIKey, &rec.Plan, &rec.CreatedAt)
+	`, apiKey).Scan(
+		&rec.ID, &rec.Name, &rec.APIKey, &rec.Plan,
+		&rec.WebhookURL, &rec.WebhookSecret, &rec.CreatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return TenantRecord{}, fmt.Errorf("store: tenant not found: %w", err)
@@ -280,6 +320,89 @@ func (s *Store) GetTenantByAPIKey(ctx context.Context, apiKey string) (TenantRec
 		return TenantRecord{}, fmt.Errorf("store: failed to lookup tenant: %w", err)
 	}
 	return rec, nil
+}
+
+func (s *Store) GetTenantByID(ctx context.Context, tenantID string) (TenantRecord, error) {
+	var rec TenantRecord
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, name, api_key, plan,
+		       COALESCE(webhook_url, ''), COALESCE(webhook_secret, ''), created_at
+		FROM tenants
+		WHERE id = $1
+	`, tenantID).Scan(
+		&rec.ID, &rec.Name, &rec.APIKey, &rec.Plan,
+		&rec.WebhookURL, &rec.WebhookSecret, &rec.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TenantRecord{}, ErrTenantNotFound
+		}
+		return TenantRecord{}, fmt.Errorf("store: failed to get tenant by id: %w", err)
+	}
+	return rec, nil
+}
+
+func (s *Store) SetTenantWebhook(ctx context.Context, tenantID, webhookURL, webhookSecret string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE tenants
+		SET webhook_url = $2, webhook_secret = $3
+		WHERE id = $1
+	`, tenantID, webhookURL, webhookSecret)
+	if err != nil {
+		return fmt.Errorf("store: failed to set tenant webhook: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ClearTenantWebhook(ctx context.Context, tenantID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE tenants
+		SET webhook_url = NULL, webhook_secret = NULL
+		WHERE id = $1
+	`, tenantID)
+	if err != nil {
+		return fmt.Errorf("store: failed to clear tenant webhook: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LogWebhookDelivery(ctx context.Context, rec WebhookDeliveryRecord) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO webhook_deliveries
+			(tenant_id, notification_request_id, status_code, attempt, success)
+		VALUES ($1, $2, $3, $4, $5)
+	`, rec.TenantID, rec.NotificationRequestID, rec.StatusCode, rec.Attempt, rec.Success)
+	if err != nil {
+		return fmt.Errorf("store: failed to log webhook delivery: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetWebhookDeliveries(ctx context.Context, tenantID string, limit int) ([]WebhookDeliveryRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, notification_request_id, status_code, attempt, success, created_at
+		FROM webhook_deliveries
+		WHERE tenant_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: failed to get webhook deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	var records []WebhookDeliveryRecord
+	for rows.Next() {
+		var r WebhookDeliveryRecord
+		if err := rows.Scan(
+			&r.ID, &r.TenantID, &r.NotificationRequestID,
+			&r.StatusCode, &r.Attempt, &r.Success, &r.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("store: webhook delivery scan error: %w", err)
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) error {

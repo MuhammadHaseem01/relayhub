@@ -11,6 +11,9 @@ type Request struct {
 	Message        string
 	Channel        string
 	IdempotencyKey string
+
+	TenantWebhookURL    string
+	TenantWebhookSecret string
 }
 
 type Response struct {

@@ -11,6 +11,7 @@ import (
 	"relayhub/internal/providers"
 	"relayhub/internal/service/notify_service"
 	"relayhub/internal/store"
+	"relayhub/internal/webhook"
 
 	"github.com/google/uuid"
 )
@@ -24,6 +25,7 @@ type Params struct {
 	Logger      *slog.Logger
 	MaxAttempts int
 	Retry       RetryFunc
+	Dispatcher  *webhook.Dispatcher
 }
 
 type service struct {
@@ -33,6 +35,7 @@ type service struct {
 	logger      *slog.Logger
 	maxAttempts int
 	retry       RetryFunc
+	dispatcher  *webhook.Dispatcher
 }
 
 func New(p Params) notify_service.NotifyService {
@@ -47,6 +50,7 @@ func New(p Params) notify_service.NotifyService {
 		logger:      p.Logger,
 		maxAttempts: p.MaxAttempts,
 		retry:       p.Retry,
+		dispatcher:  p.Dispatcher,
 	}
 }
 
@@ -139,6 +143,26 @@ func (s *service) Send(ctx context.Context, req notify_service.Request) (notify_
 			statusCode = http.StatusBadGateway
 		}
 		s.idemStore.Save(req.IdempotencyKey, statusCode, body)
+	}
+
+	if s.dispatcher != nil {
+		event := "notification.delivered"
+		if sendErr != nil {
+			event = "notification.failed"
+		}
+		s.dispatcher.FireAsync(
+			req.TenantID,
+			req.TenantWebhookURL,
+			req.TenantWebhookSecret,
+			webhook.EventPayload{
+				Event:        event,
+				RequestID:    requestID,
+				ChannelUsed:  finalChannel,
+				FallbackUsed: fallbackUsed,
+				Attempts:     totalAttempts,
+				Timestamp:    time.Now().UTC(),
+			},
+		)
 	}
 
 	return resp, sendErr

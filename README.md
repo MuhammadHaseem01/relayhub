@@ -6,6 +6,22 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 3 — Outbound Webhooks (Step 3 complete ✅)
+
+| Feature | Status |
+|---|---|
+| `PUT /v1/webhook` — register a webhook URL (HTTPS only) | ✅ |
+| Auto-generated `webhook_secret` (32-byte hex, shown once) | ✅ |
+| Secret reused on URL update — explicit rotation not needed | ✅ |
+| `DELETE /v1/webhook` — remove webhook configuration | ✅ |
+| Push event on every final notification status (delivered / failed) | ✅ |
+| HMAC-SHA256 signing — `X-RelayHub-Signature: sha256=<hex>` header | ✅ |
+| Async fire — webhook never blocks `/v1/notify` response | ✅ |
+| Retry with exponential backoff — up to 3 attempts, 5 s timeout each | ✅ |
+| `webhook_deliveries` table — full audit log of every attempt | ✅ |
+| `GET /v1/webhook/deliveries` — debug your webhook endpoint | ✅ |
+| Works for both immediate and scheduled notifications | ✅ |
+
 ## Phase 3 — Scheduled Sends (Step 2 complete ✅)
 
 | Feature | Status |
@@ -658,13 +674,145 @@ relayhub/
 │   ├── service/notify_service/                 # NotifyService interface + Request/Response types
 │   │   └── notify_service_impl/                # Retry, fallback, idempotency, DB logging
 │   └── store/
-│       ├── store.go                            # PostgreSQL store — tenants, notifications, templates
+│       ├── store.go                            # PostgreSQL store — tenants, notifications, templates, webhooks
 │       └── template.go                         # SubstituteVars() — {{placeholder}} substitution engine
 ├── internal/scheduler/scheduler.go             # Background worker — claims and dispatches due notifications
+├── internal/webhook/webhook.go                 # HMAC signing, event payload, async dispatcher
 ├── Dockerfile                                  # Multi-stage build
 ├── docker-compose.yml                          # App + Postgres
 ├── .env.example                                # Config template
 └── README.md
+```
+
+---
+
+## Outbound Webhooks
+
+RelayHub can push a signed event to a URL you control whenever a notification reaches its final state (delivered or failed). This eliminates polling `GET /v1/notify/:id`.
+
+### Configure Your Webhook
+
+```http
+PUT /v1/webhook
+X-API-Key: <your-api-key>
+Content-Type: application/json
+
+{"webhook_url": "https://your-backend.com/relayhub-events"}
+```
+
+Response:
+```json
+{
+  "success": true,
+  "data": {
+    "webhook_url": "https://your-backend.com/relayhub-events",
+    "webhook_secret": "3a7f...c9d2"
+  }
+}
+```
+
+> ⚠️ **Save `webhook_secret` immediately.** It is only returned in full on this response. Subsequent `PUT` calls to update the URL will return the same secret — it is never regenerated unless you `DELETE` and re-register.
+
+### Remove Your Webhook
+
+```http
+DELETE /v1/webhook
+X-API-Key: <your-api-key>
+```
+
+Returns `204 No Content`.
+
+### Event Payload
+
+RelayHub POSTs the following JSON to your webhook URL:
+
+```json
+{
+  "event": "notification.delivered",
+  "request_id": "305d2c66-d3b5-4307-bf96-2338a0af0e28",
+  "channel_used": "email",
+  "fallback_used": false,
+  "attempts": 1,
+  "timestamp": "2026-07-24T17:14:00Z"
+}
+```
+
+`event` is one of:
+- `notification.delivered` — message reached the provider successfully
+- `notification.failed` — all retry attempts exhausted
+
+### Verifying the Signature
+
+Every request includes an `X-RelayHub-Signature` header:
+
+```
+X-RelayHub-Signature: sha256=3a7fbc...
+```
+
+The signature is `HMAC-SHA256(webhook_secret_bytes, raw_request_body)` encoded as hex.
+
+**Go verification snippet** (language-agnostic logic — see note below):
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+    "io"
+    "net/http"
+)
+
+func verifyRelayHubSignature(r *http.Request, secret string) bool {
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        return false
+    }
+
+    // Decode the hex secret into raw bytes.
+    secretBytes, err := hex.DecodeString(secret)
+    if err != nil {
+        return false
+    }
+
+    // Compute expected HMAC-SHA256.
+    mac := hmac.New(sha256.New, secretBytes)
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+    // Use constant-time comparison to prevent timing attacks.
+    sig := r.Header.Get("X-RelayHub-Signature")
+    return hmac.Equal([]byte(expected), []byte(sig))
+}
+```
+
+> **Language-agnostic note:** The same logic applies in any language — compute `HMAC-SHA256` of the **raw request body bytes** using the hex-decoded secret, then compare the result (prefixed with `sha256=`) to the header value using a **constant-time** string comparison function.
+
+### Inspect Delivery Attempts
+
+```http
+GET /v1/webhook/deliveries?limit=20
+X-API-Key: <your-api-key>
+```
+
+Response:
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "deliveries": [
+      {
+        "id": 1,
+        "tenant_id": "ca9a53bb-...",
+        "notification_request_id": "305d2c66-...",
+        "status_code": 200,
+        "attempt": 1,
+        "success": true,
+        "created_at": "2026-07-24T17:14:31Z"
+      }
+    ]
+  }
+}
 ```
 
 ---
@@ -675,6 +823,6 @@ relayhub/
 - **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
 - **Phase 3 Step 1** ✅ Message templates — CRUD endpoints, `{{variable}}` substitution, tenant isolation
 - **Phase 3 Step 2** ✅ Scheduled sends — `send_at`, background scheduler, cancel endpoint, multi-instance safe
-- **Phase 3 Step 3** 🔜 Outbound webhooks
+- **Phase 3 Step 3** ✅ Outbound webhooks — HMAC-signed push events, async delivery, retry, audit log
 - **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue
 - **Phase 5** 🔜 React dashboard — logs, usage charts, template editor
