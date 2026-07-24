@@ -14,14 +14,12 @@ import (
 	"relayhub/internal/providers"
 	"relayhub/internal/retry"
 	"relayhub/internal/router"
+	"relayhub/internal/scheduler"
 	"relayhub/internal/service/notify_service/notify_service_impl"
 	"relayhub/internal/store"
 )
 
-// Start wires all dependencies, starts the HTTP server, and blocks until a
-// shutdown signal is received or a fatal error occurs.
 func Start(cfg *config.Config, logger *slog.Logger) error {
-	// ── Store ─────────────────────────────────────────────────────────────────
 	db, err := store.New(cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("database init: %w", err)
@@ -31,13 +29,12 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 
 	idemStore := store.NewInMemoryIdempotencyStore()
 
-	// ── Providers ─────────────────────────────────────────────────────────────
 	discord := providers.NewDiscordProvider(cfg.DiscordWebhookURL)
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
+	allProviders := []providers.Sender{discord, email}
 
-	// ── Services ──────────────────────────────────────────────────────────────
 	notifySvc := notify_service_impl.New(notify_service_impl.Params{
-		Providers:   []providers.Sender{discord, email},
+		Providers:   allProviders,
 		Store:       db,
 		IdemStore:   idemStore,
 		Logger:      logger,
@@ -45,19 +42,30 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		Retry:       retry.WithRetry,
 	})
 
-	// ── Router ────────────────────────────────────────────────────────────────
 	r := router.New(router.Config{
 		NotifyService: notifySvc,
 		Store:         db,
 		Logger:        logger,
 	})
 
-	// ── HTTP Server ───────────────────────────────────────────────────────────
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+
+	sched := scheduler.New(scheduler.Params{
+		Store:       db,
+		Providers:   allProviders,
+		Retry:       retry.WithRetry,
+		MaxAttempts: 3,
+		Interval:    30 * time.Second,
+		Logger:      logger,
+	})
+	go sched.Run(schedCtx)
 
 	errs := make(chan error, 1)
 	go func() {
@@ -65,7 +73,6 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		errs <- srv.ListenAndServe()
 	}()
 
-	// Block until OS signal or server error
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGABRT, os.Interrupt)
 
@@ -76,6 +83,7 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		}
 	case sig := <-stop:
 		logger.Info("shutdown signal received", "signal", sig)
+		schedCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return srv.Shutdown(ctx)

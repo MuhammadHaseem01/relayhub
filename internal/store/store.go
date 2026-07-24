@@ -13,6 +13,8 @@ import (
 
 var ErrDuplicateTemplate = errors.New("store: template name already exists for this tenant")
 var ErrTemplateNotFound = errors.New("store: template not found")
+var ErrNotificationNotFound = errors.New("store: notification not found")
+var ErrNotificationAlreadySent = errors.New("store: notification already sent or cancelled")
 
 type TenantRecord struct {
 	ID        string    `json:"id"`
@@ -32,19 +34,22 @@ type TemplateRecord struct {
 }
 
 type NotificationRecord struct {
-	ID                int64     `json:"id"`
-	TenantID          string    `json:"tenant_id"`
-	RequestID         string    `json:"request_id"`
-	Recipient         string    `json:"recipient"`
-	Channel           string    `json:"channel"`
-	Message           string    `json:"message"`
-	Status            string    `json:"status"`
-	ErrorMessage      string    `json:"error_message"`
-	Attempts          int       `json:"attempts"`
-	FallbackUsed      bool      `json:"fallback_used"`
-	IdempotencyKey    string    `json:"idempotency_key"`
-	WasCachedResponse bool      `json:"was_cached_response"`
-	CreatedAt         time.Time `json:"created_at"`
+	ID                int64      `json:"id"`
+	TenantID          string     `json:"tenant_id"`
+	RequestID         string     `json:"request_id"`
+	Recipient         string     `json:"recipient"`
+	Channel           string     `json:"channel"`
+	Message           string     `json:"message"`
+	Status            string     `json:"status"`
+	ErrorMessage      string     `json:"error_message"`
+	Attempts          int        `json:"attempts"`
+	FallbackUsed      bool       `json:"fallback_used"`
+	IdempotencyKey    string     `json:"idempotency_key"`
+	WasCachedResponse bool       `json:"was_cached_response"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ScheduledFor      *time.Time `json:"scheduled_for,omitempty"`
+	DiscordRecipient  string     `json:"discord_recipient,omitempty"`
+	EmailRecipient    string     `json:"email_recipient,omitempty"`
 }
 
 type Store struct {
@@ -117,6 +122,17 @@ func (s *Store) migrate(ctx context.Context) error {
 
 		CREATE INDEX IF NOT EXISTS idx_notifications_tenant_id
 			ON notifications (tenant_id);
+
+		-- ── Scheduled-send columns (Phase 3 Step 2) ───────────────────────────
+		ALTER TABLE notifications
+			ADD COLUMN IF NOT EXISTS scheduled_for     TIMESTAMPTZ NULL,
+			ADD COLUMN IF NOT EXISTS discord_recipient TEXT        NOT NULL DEFAULT '',
+			ADD COLUMN IF NOT EXISTS email_recipient   TEXT        NOT NULL DEFAULT '';
+
+		-- Partial index: only index rows that still need to fire.
+		CREATE INDEX IF NOT EXISTS idx_notifications_scheduled
+			ON notifications (scheduled_for ASC)
+			WHERE status = 'scheduled';
 
 		-- ── Templates ──────────────────────────────────────────────────────────
 		CREATE TABLE IF NOT EXISTS templates (
@@ -270,12 +286,141 @@ func (s *Store) LogNotification(ctx context.Context, rec NotificationRecord) err
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notifications
 			(tenant_id, request_id, recipient, channel, message, status,
-			 error_message, attempts, fallback_used, idempotency_key, was_cached_response)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			 error_message, attempts, fallback_used, idempotency_key, was_cached_response,
+			 discord_recipient, email_recipient)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`, rec.TenantID, rec.RequestID, rec.Recipient, rec.Channel, rec.Message, rec.Status,
-		rec.ErrorMessage, rec.Attempts, rec.FallbackUsed, rec.IdempotencyKey, rec.WasCachedResponse)
+		rec.ErrorMessage, rec.Attempts, rec.FallbackUsed, rec.IdempotencyKey, rec.WasCachedResponse,
+		rec.DiscordRecipient, rec.EmailRecipient)
 	if err != nil {
 		return fmt.Errorf("store: failed to log notification: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) CreateScheduled(ctx context.Context, rec NotificationRecord) (NotificationRecord, error) {
+	var out NotificationRecord
+	var sf *time.Time
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO notifications
+			(tenant_id, request_id, recipient, channel, message, status,
+			 error_message, attempts, fallback_used, idempotency_key, was_cached_response,
+			 scheduled_for, discord_recipient, email_recipient)
+		VALUES ($1, $2, $3, $4, $5, 'scheduled',
+			 '', 0, false, $6, false,
+			 $7, $8, $9)
+		RETURNING id, tenant_id, request_id, recipient, channel, message, status,
+				  error_message, attempts, fallback_used, idempotency_key,
+				  was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+	`, rec.TenantID, rec.RequestID, rec.Recipient, rec.Channel, rec.Message,
+		rec.IdempotencyKey, rec.ScheduledFor,
+		rec.DiscordRecipient, rec.EmailRecipient,
+	).Scan(
+		&out.ID, &out.TenantID, &out.RequestID, &out.Recipient, &out.Channel, &out.Message, &out.Status,
+		&out.ErrorMessage, &out.Attempts, &out.FallbackUsed, &out.IdempotencyKey,
+		&out.WasCachedResponse, &out.CreatedAt, &sf, &out.DiscordRecipient, &out.EmailRecipient,
+	)
+	if err != nil {
+		return NotificationRecord{}, fmt.Errorf("store: failed to create scheduled notification: %w", err)
+	}
+	out.ScheduledFor = sf
+	return out, nil
+}
+
+func (s *Store) ClaimDueNotifications(ctx context.Context, limit int) ([]NotificationRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		UPDATE notifications
+		SET status = 'processing'
+		WHERE id IN (
+			SELECT id FROM notifications
+			WHERE status = 'scheduled' AND scheduled_for <= NOW()
+			ORDER BY scheduled_for ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, tenant_id, request_id, recipient, channel, message, status,
+				  error_message, attempts, fallback_used, idempotency_key,
+				  was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: failed to claim due notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var records []NotificationRecord
+	for rows.Next() {
+		var r NotificationRecord
+		var sf *time.Time
+		if err := rows.Scan(
+			&r.ID, &r.TenantID, &r.RequestID, &r.Recipient, &r.Channel, &r.Message, &r.Status,
+			&r.ErrorMessage, &r.Attempts, &r.FallbackUsed, &r.IdempotencyKey,
+			&r.WasCachedResponse, &r.CreatedAt, &sf, &r.DiscordRecipient, &r.EmailRecipient,
+		); err != nil {
+			return nil, fmt.Errorf("store: claim scan error: %w", err)
+		}
+		r.ScheduledFor = sf
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) UpdateNotificationStatus(
+	ctx context.Context,
+	requestID, status, errMsg string,
+	attempts int,
+	fallbackUsed bool,
+) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE notifications
+		SET status = $2, error_message = $3, attempts = $4, fallback_used = $5
+		WHERE request_id = $1
+	`, requestID, status, errMsg, attempts, fallbackUsed)
+	if err != nil {
+		return fmt.Errorf("store: failed to update notification status: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetNotificationByRequestID(ctx context.Context, tenantID, requestID string) (NotificationRecord, error) {
+	var r NotificationRecord
+	var sf *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, request_id, recipient, channel, message, status,
+			   error_message, attempts, fallback_used, idempotency_key,
+			   was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+		FROM notifications
+		WHERE request_id = $1 AND tenant_id = $2
+	`, requestID, tenantID).Scan(
+		&r.ID, &r.TenantID, &r.RequestID, &r.Recipient, &r.Channel, &r.Message, &r.Status,
+		&r.ErrorMessage, &r.Attempts, &r.FallbackUsed, &r.IdempotencyKey,
+		&r.WasCachedResponse, &r.CreatedAt, &sf, &r.DiscordRecipient, &r.EmailRecipient,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NotificationRecord{}, ErrNotificationNotFound
+		}
+		return NotificationRecord{}, fmt.Errorf("store: failed to get notification: %w", err)
+	}
+	r.ScheduledFor = sf
+	return r, nil
+}
+
+func (s *Store) CancelScheduledNotification(ctx context.Context, tenantID, requestID string) error {
+	r, err := s.GetNotificationByRequestID(ctx, tenantID, requestID)
+	if err != nil {
+		return err
+	}
+	if r.Status != "scheduled" {
+		return ErrNotificationAlreadySent
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		UPDATE notifications
+		SET status = 'cancelled'
+		WHERE request_id = $1 AND tenant_id = $2 AND status = 'scheduled'
+	`, requestID, tenantID)
+	if err != nil {
+		return fmt.Errorf("store: failed to cancel notification: %w", err)
 	}
 	return nil
 }
@@ -287,7 +432,7 @@ func (s *Store) GetLogs(ctx context.Context, tenantID string, limit int) ([]Noti
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, tenant_id, request_id, recipient, channel, message, status,
 		       error_message, attempts, fallback_used, idempotency_key,
-		       was_cached_response, created_at
+		       was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
 		FROM notifications
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -301,13 +446,16 @@ func (s *Store) GetLogs(ctx context.Context, tenantID string, limit int) ([]Noti
 	var records []NotificationRecord
 	for rows.Next() {
 		var r NotificationRecord
+		var sf *time.Time
 		if err := rows.Scan(
 			&r.ID, &r.TenantID, &r.RequestID, &r.Recipient, &r.Channel,
 			&r.Message, &r.Status, &r.ErrorMessage, &r.Attempts,
 			&r.FallbackUsed, &r.IdempotencyKey, &r.WasCachedResponse, &r.CreatedAt,
+			&sf, &r.DiscordRecipient, &r.EmailRecipient,
 		); err != nil {
 			return nil, fmt.Errorf("store: row scan error: %w", err)
 		}
+		r.ScheduledFor = sf
 		records = append(records, r)
 	}
 

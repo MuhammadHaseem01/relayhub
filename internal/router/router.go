@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxScheduleAhead = 30 * 24 * time.Hour
+
 type Config struct {
 	NotifyService notify_service.NotifyService
 	Store         *store.Store
@@ -51,6 +53,8 @@ func (s *Server) routes() http.Handler {
 	rl := middleware.RateLimit(s.rateLimiter)
 
 	mux.Handle("POST /v1/notify", auth(rl(http.HandlerFunc(s.handleSend))))
+	mux.Handle("GET /v1/notify/{request_id}", auth(http.HandlerFunc(s.handleGetNotification)))
+	mux.Handle("DELETE /v1/notify/{request_id}", auth(http.HandlerFunc(s.handleCancelNotification)))
 
 	mux.Handle("GET /v1/logs", auth(http.HandlerFunc(s.handleLogs)))
 	mux.Handle("GET /v1/usage", auth(http.HandlerFunc(s.handleUsage)))
@@ -145,6 +149,8 @@ type notifyRequest struct {
 
 	Template  string            `json:"template"`
 	Variables map[string]string `json:"variables"`
+
+	SendAt string `json:"send_at"`
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +227,47 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.SendAt != "" {
+		sendAt, err := time.Parse(time.RFC3339, req.SendAt)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "send_at must be a valid RFC3339 timestamp (e.g. 2026-07-25T09:00:00Z)")
+			return
+		}
+		if sendAt.After(time.Now().Add(maxScheduleAhead)) {
+			writeError(w, http.StatusBadRequest, "send_at must not be more than 30 days in the future")
+			return
+		}
+		if sendAt.After(time.Now()) {
+			requestID := uuid.New().String()
+			rec, err := s.store.CreateScheduled(r.Context(), store.NotificationRecord{
+				TenantID:         tenant.ID,
+				RequestID:        requestID,
+				Recipient:        req.Recipient,
+				Channel:          req.Channel,
+				Message:          req.Message,
+				IdempotencyKey:   req.IdempotencyKey,
+				ScheduledFor:     &sendAt,
+				DiscordRecipient: req.DiscordRecipient,
+				EmailRecipient:   req.EmailRecipient,
+			})
+			if err != nil {
+				s.logger.Error("failed to schedule notification", "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to schedule notification")
+				return
+			}
+			s.logger.Info("notification scheduled", "request_id", requestID, "send_at", sendAt)
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"request_id":    rec.RequestID,
+					"status":        "scheduled",
+					"scheduled_for": sendAt.UTC().Format(time.RFC3339),
+				},
+			})
+			return
+		}
+	}
+
 	resp, err := s.notify.Send(r.Context(), notify_service.Request{
 		TenantID:         tenant.ID,
 		Recipient:        req.Recipient,
@@ -245,6 +292,50 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCreated(w, resp)
+}
+
+func (s *Server) handleGetNotification(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	reqID := r.PathValue("request_id")
+	rec, err := s.store.GetNotificationByRequestID(r.Context(), tenant.ID, reqID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotificationNotFound) {
+			writeError(w, http.StatusNotFound, "notification not found: "+reqID)
+			return
+		}
+		s.logger.Error("get notification failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get notification")
+		return
+	}
+	writeOK(w, rec)
+}
+
+func (s *Server) handleCancelNotification(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	reqID := r.PathValue("request_id")
+	if err := s.store.CancelScheduledNotification(r.Context(), tenant.ID, reqID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotificationNotFound):
+			writeError(w, http.StatusNotFound, "notification not found: "+reqID)
+		case errors.Is(err, store.ErrNotificationAlreadySent):
+			writeError(w, http.StatusConflict, "notification has already been sent or cancelled")
+		default:
+			s.logger.Error("cancel notification failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to cancel notification")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type createTemplateRequest struct {

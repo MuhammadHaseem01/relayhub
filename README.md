@@ -6,6 +6,21 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 3 — Scheduled Sends (Step 2 complete ✅)
+
+| Feature | Status |
+|---|---|
+| `send_at` field on `POST /v1/notify` — queue for a future time | ✅ |
+| 202 Accepted response with `status: "scheduled"` | ✅ |
+| 30-day maximum schedule window (400 if exceeded) | ✅ |
+| Background scheduler — polls every 30 s, claims atomically with `SKIP LOCKED` | ✅ |
+| Multi-instance safe — no double-sends with concurrent app instances | ✅ |
+| `GET /v1/notify/:request_id` — check delivery status | ✅ |
+| `DELETE /v1/notify/:request_id` — cancel before it fires | ✅ |
+| Graceful shutdown — scheduler stops cleanly on SIGTERM | ✅ |
+| Templates + `send_at` together — variables resolved at request time | ✅ |
+| Tenant isolation on all new endpoints | ✅ |
+
 ## Phase 3 — Templates (Step 1 complete ✅)
 
 | Feature | Status |
@@ -238,6 +253,48 @@ Pass the name of a previously created template and a `variables` map. All `{{pla
 }
 ```
 
+#### Option C — scheduled send (`send_at`)
+
+Add `"send_at"` (RFC3339) to any request shape. If the timestamp is in the future the notification is **queued, not sent**. The scheduler fires it within 30 seconds of the due time.
+
+```json
+{
+  "channel":   "email",
+  "recipient": "ali@example.com",
+  "message":   "Your subscription renews tomorrow!",
+  "send_at":   "2026-07-25T09:00:00Z"
+}
+```
+
+You can combine templates + `send_at`:
+```json
+{
+  "channel":   "email",
+  "recipient": "ali@example.com",
+  "template":  "order_shipped",
+  "variables": { "customer_name": "Ali", "order_id": "4471" },
+  "send_at":   "2026-07-25T09:00:00Z"
+}
+```
+> Variables are resolved **at request time** and the final message text is stored. This prevents stale data if variables change before the scheduled time.
+
+**Scheduled response (202 Accepted):**
+```json
+{
+  "success": true,
+  "data": {
+    "request_id":    "550e8400-e29b-41d4-a716-446655440000",
+    "status":        "scheduled",
+    "scheduled_for": "2026-07-25T09:00:00Z"
+  }
+}
+```
+
+**Validation errors:**
+- `send_at` not RFC3339 → 400
+- `send_at` more than 30 days in the future → 400
+- `send_at` in the past or omitted → sends immediately (existing behaviour)
+
 **Missing variable response (400):**
 If a placeholder in the template has no matching key in `variables`, the request is rejected and every missing key is listed:
 ```json
@@ -365,6 +422,51 @@ Permanently delete a template.
 
 **Success (204):** empty body.
 **Not found (404):** `{ "success": false, "error": "template not found: order_shipped" }`
+
+---
+
+### `GET /v1/notify/:request_id`
+
+Returns the current status of any notification (immediate or scheduled). Requires `X-API-Key`.
+
+Useful for polling a scheduled notification to see if it has fired yet.
+
+**Success (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "id":            1,
+    "tenant_id":     "...",
+    "request_id":    "550e8400-e29b-41d4-a716-446655440000",
+    "recipient":     "ali@example.com",
+    "channel":       "email",
+    "message":       "Hello Ali!",
+    "status":        "scheduled",
+    "scheduled_for": "2026-07-25T09:00:00Z",
+    "created_at":    "2026-07-22T18:00:00Z"
+  }
+}
+```
+
+Possible `status` values: `scheduled`, `processing`, `delivered`, `failed`, `cancelled`.
+
+**Not found (404):** returned for both non-existent IDs and IDs belonging to another tenant — existence is never leaked.
+
+---
+
+### `DELETE /v1/notify/:request_id`
+
+Cancels a scheduled notification **before it fires**. Requires `X-API-Key`.
+
+**Success (204):** empty body. The notification will never be sent.
+
+**Already sent / in-progress (409):**
+```json
+{ "success": false, "error": "notification has already been sent or cancelled" }
+```
+
+**Not found (404):** as with GET, 404 covers both missing and wrong-tenant cases.
 
 ---
 
@@ -558,6 +660,7 @@ relayhub/
 │   └── store/
 │       ├── store.go                            # PostgreSQL store — tenants, notifications, templates
 │       └── template.go                         # SubstituteVars() — {{placeholder}} substitution engine
+├── internal/scheduler/scheduler.go             # Background worker — claims and dispatches due notifications
 ├── Dockerfile                                  # Multi-stage build
 ├── docker-compose.yml                          # App + Postgres
 ├── .env.example                                # Config template
@@ -571,6 +674,7 @@ relayhub/
 - **Phase 1** ✅ Core engine — Discord provider, Email provider, delivery logs, retry, fallback, idempotency
 - **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
 - **Phase 3 Step 1** ✅ Message templates — CRUD endpoints, `{{variable}}` substitution, tenant isolation
-- **Phase 3 Step 2** 🔜 Scheduled sends
+- **Phase 3 Step 2** ✅ Scheduled sends — `send_at`, background scheduler, cancel endpoint, multi-instance safe
+- **Phase 3 Step 3** 🔜 Outbound webhooks
 - **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue
 - **Phase 5** 🔜 React dashboard — logs, usage charts, template editor
