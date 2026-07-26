@@ -6,6 +6,20 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 3 — SMTP Provider (Step 4 complete ✅)
+
+| Feature | Status |
+|---|---|
+| `channel=smtp` — second independent email path via plain SMTP | ✅ |
+| Stdlib-only: `net/smtp` + `crypto/tls`, zero new dependencies | ✅ |
+| STARTTLS (port 587) and implicit TLS/SMTPS (port 465) | ✅ |
+| Unauthenticated mode for local catchers (Mailpit, MailHog) | ✅ |
+| Clear errors: auth failure, connection refused, invalid recipient | ✅ |
+| Config via `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | ✅ |
+| Unit tests — in-process mock SMTP server, no real credentials needed | ✅ |
+| `channel=email` (Resend) unchanged — zero breaking change | ✅ |
+| Adapter pattern proven: zero changes to core service / retry logic | ✅ |
+
 ## Phase 3 — Outbound Webhooks (Step 3 complete ✅)
 
 | Feature | Status |
@@ -140,6 +154,84 @@ You can send up to 3,000 emails per month for free using Resend.
 
 ---
 
+## Getting free SMTP credentials (SMTP Provider)
+
+RelayHub's `channel=smtp` uses plain SMTP — any server that speaks the protocol works.
+Two free options are covered below; **Mailtrap** is recommended because you can see captured messages in a nice web UI without anything landing in a real inbox.
+
+### Option A — Mailtrap sandbox *(recommended for testing)*
+
+[Mailtrap](https://mailtrap.io) captures outgoing emails in a sandboxed inbox — nothing is ever delivered to real recipients, which makes it perfect for development.
+
+1. Go to [mailtrap.io](https://mailtrap.io) and sign up for a free account (no credit card).
+2. In the dashboard, go to **Email Testing → Inboxes**.
+3. Click the default inbox (or create a new one).
+4. Select **SMTP** from the integration dropdown. You will see credentials like:
+   ```
+   Host:     sandbox.smtp.mailtrap.io
+   Port:     587
+   Username: <your-mailtrap-username>
+   Password: <your-mailtrap-password>
+   ```
+5. Copy these four values into your `.env`:
+   ```env
+   SMTP_HOST=sandbox.smtp.mailtrap.io
+   SMTP_PORT=587
+   SMTP_USERNAME=<your-mailtrap-username>
+   SMTP_PASSWORD=<your-mailtrap-password>
+   SMTP_FROM=test@myapp.dev
+   ```
+6. Send a test notification (see curl example below) and watch the email appear in Mailtrap's inbox.
+
+> **Free tier:** 1,000 emails/month, unlimited inboxes, full API access — no card required.
+
+### Option B — Gmail App Password *(sends real emails)*
+
+If you need emails to actually land in an inbox, use a Gmail account with an App Password.
+This requires 2-Step Verification to be enabled on your Google Account.
+
+1. Go to [myaccount.google.com/security](https://myaccount.google.com/security) and ensure **2-Step Verification** is on.
+2. Visit [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+3. Under "Select app" choose **Mail**; under "Select device" choose **Other** and type `RelayHub`.
+4. Click **Generate** — Google shows a 16-character password (e.g. `abcd efgh ijkl mnop`). Copy it (spaces are ignored).
+5. Add to your `.env`:
+   ```env
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=587
+   SMTP_USERNAME=you@gmail.com
+   SMTP_PASSWORD=abcdefghijklmnop   # the 16-char app password, no spaces
+   SMTP_FROM=you@gmail.com
+   ```
+
+> **Note:** Gmail App Passwords send real emails and count toward your Gmail sending limits. Use Mailtrap for load testing or when you don't want to risk landing in spam.
+
+### curl example — send via SMTP
+
+```bash
+curl -s -X POST http://localhost:8080/v1/notify \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rh_your_api_key" \
+  -d '{
+    "channel":   "smtp",
+    "recipient": "you@example.com",
+    "message":   "Hello from RelayHub via SMTP!"
+  }' | jq
+```
+
+Expected response:
+```json
+{
+  "success": true,
+  "data": {
+    "request_id": "550e8400-...",
+    "channel":    "smtp",
+    "status":     "delivered"
+  }
+}
+```
+
+---
+
 ## Running locally with Docker Compose
 
 ### Prerequisites
@@ -230,7 +322,16 @@ You can supply the message body in two ways — **plain message** or **template*
 
 #### Option A — plain message
 
-**Request body (Discord or Email):**
+**Channel values:**
+
+| `channel` | Provider | `recipient` format |
+|---|---|---|
+| `discord` | Discord Webhook | Full Discord Webhook URL |
+| `email` | Resend API | Email address |
+| `smtp` | Plain SMTP server | Email address |
+| `auto` | Discord → Resend fallback | Needs `discord_recipient` + `email_recipient` |
+
+**Request body (Discord):**
 ```json
 {
   "recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
@@ -239,17 +340,32 @@ You can supply the message body in two ways — **plain message** or **template*
 }
 ```
 
-> **Note:** For `channel=discord`, `recipient` is the full Discord Webhook URL.
-> For `channel=email`, `recipient` is an email address.
-
-**Request body (Auto Fallback):**
-If channel is `"auto"`, the system will try Discord first (with retries). If it completely fails, it automatically falls back to Email.
+**Request body (Email via Resend):**
 ```json
 {
-  "message":          "Hello from RelayHub! 🚀",
-  "channel":          "auto",
+  "recipient": "you@example.com",
+  "message":   "Hello from RelayHub! 🚀",
+  "channel":   "email"
+}
+```
+
+**Request body (Email via SMTP):**
+```json
+{
+  "recipient": "you@example.com",
+  "message":   "Hello from RelayHub! 🚀",
+  "channel":   "smtp"
+}
+```
+
+**Request body (Auto Fallback — Discord then Resend):**
+If channel is `"auto"`, the system will try Discord first (with retries). If it completely fails, it automatically falls back to Resend email.
+```json
+{
+  "message":           "Hello from RelayHub! 🚀",
+  "channel":           "auto",
   "discord_recipient": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
-  "email_recipient":  "you@example.com"
+  "email_recipient":   "you@example.com"
 }
 ```
 
