@@ -225,13 +225,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "auto channel requires discord_recipient and email_recipient")
 			return
 		}
-	case "discord", "email":
+	case "discord", "email", "smtp":
 		if req.Recipient == "" {
 			writeError(w, http.StatusBadRequest, "recipient is required for channel="+req.Channel)
 			return
 		}
 	default:
-		writeError(w, http.StatusBadRequest, "unsupported channel: "+req.Channel+" — supported: discord, email, auto")
+		writeError(w, http.StatusBadRequest, "unsupported channel: "+req.Channel+" — supported: discord, email, smtp, auto")
 		return
 	}
 

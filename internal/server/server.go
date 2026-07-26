@@ -32,7 +32,12 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 
 	discord := providers.NewDiscordProvider(cfg.DiscordWebhookURL)
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
-	allProviders := []providers.Sender{discord, email}
+	smtpProvider := providers.NewSMTPProvider(
+		cfg.SMTPHost, cfg.SMTPPort,
+		cfg.SMTPUsername, cfg.SMTPPassword,
+		cfg.SMTPFrom,
+	)
+	allProviders := []providers.Sender{discord, email, smtpProvider}
 
 	whDispatcher := webhook.New(webhook.Params{
 		Store:       db,
