@@ -11,13 +11,15 @@ import (
 	"time"
 
 	"relayhub/internal/config"
+	"relayhub/internal/dispatch"
 	"relayhub/internal/providers"
+	"relayhub/internal/queue"
 	"relayhub/internal/retry"
 	"relayhub/internal/router"
 	"relayhub/internal/scheduler"
-	"relayhub/internal/service/notify_service/notify_service_impl"
 	"relayhub/internal/store"
 	"relayhub/internal/webhook"
+	"relayhub/internal/worker"
 )
 
 func Start(cfg *config.Config, logger *slog.Logger) error {
@@ -28,7 +30,18 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 	defer db.Close()
 	logger.Info("connected to postgres")
 
-	idemStore := store.NewInMemoryIdempotencyStore()
+	q, err := queue.New(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("queue init: %w", err)
+	}
+	defer q.Close()
+	if err := q.Ping(context.Background()); err != nil {
+		return fmt.Errorf("redis unreachable: %w", err)
+	}
+	if err := q.EnsureGroup(context.Background()); err != nil {
+		return fmt.Errorf("redis consumer group init: %w", err)
+	}
+	logger.Info("connected to redis", "url", cfg.RedisURL)
 
 	discord := providers.NewDiscordProvider(cfg.DiscordWebhookURL)
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
@@ -38,6 +51,10 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		cfg.SMTPFrom,
 	)
 	allProviders := []providers.Sender{discord, email, smtpProvider}
+	providerMap := make(map[string]providers.Sender, len(allProviders))
+	for _, p := range allProviders {
+		providerMap[p.Name()] = p
+	}
 
 	whDispatcher := webhook.New(webhook.Params{
 		Store:       db,
@@ -46,21 +63,23 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		Logger:      logger,
 	})
 
-	notifySvc := notify_service_impl.New(notify_service_impl.Params{
-		Providers:   allProviders,
-		Store:       db,
-		IdemStore:   idemStore,
-		Logger:      logger,
-		MaxAttempts: 3,
+	executor := &dispatch.Executor{
+		Providers:   providerMap,
 		Retry:       retry.WithRetry,
+		MaxAttempts: 3,
+		Store:       db,
 		Dispatcher:  whDispatcher,
-	})
+		Logger:      logger,
+	}
+
+	idemStore := store.NewInMemoryIdempotencyStore()
 
 	r := router.New(router.Config{
-		NotifyService: notifySvc,
-		Store:         db,
-		Logger:        logger,
-		Dispatcher:    whDispatcher,
+		Store:      db,
+		Logger:     logger,
+		Dispatcher: whDispatcher,
+		Queue:      q,
+		IdemStore:  idemStore,
 	})
 
 	srv := &http.Server{
@@ -69,19 +88,24 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	schedCtx, schedCancel := context.WithCancel(context.Background())
-	defer schedCancel()
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
 
 	sched := scheduler.New(scheduler.Params{
-		Store:       db,
-		Providers:   allProviders,
-		Retry:       retry.WithRetry,
-		MaxAttempts: 3,
-		Interval:    30 * time.Second,
-		Logger:      logger,
-		Dispatcher:  whDispatcher,
+		Store:    db,
+		Queue:    q,
+		Interval: 30 * time.Second,
+		Logger:   logger,
 	})
-	go sched.Run(schedCtx)
+	go sched.Run(bgCtx)
+
+	pool := worker.New(worker.Params{
+		WorkerCount: cfg.WorkerCount,
+		Queue:       q,
+		Executor:    executor,
+		Logger:      logger,
+	})
+	go pool.Run(bgCtx)
 
 	errs := make(chan error, 1)
 	go func() {
@@ -99,8 +123,8 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		}
 	case sig := <-stop:
 		logger.Info("shutdown signal received", "signal", sig)
-		schedCancel()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		bgCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(ctx)
 	}

@@ -165,7 +165,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			ADD COLUMN IF NOT EXISTS webhook_url    TEXT NULL,
 			ADD COLUMN IF NOT EXISTS webhook_secret TEXT NULL;
 
-		-- ── Webhook delivery audit log ───────────────────────────────────────────
+		-- ── Webhook delivery audit log ───────────────────────────────────────────────
 		CREATE TABLE IF NOT EXISTS webhook_deliveries (
 			id                      BIGSERIAL    PRIMARY KEY,
 			tenant_id               UUID         NOT NULL REFERENCES tenants(id),
@@ -178,8 +178,44 @@ func (s *Store) migrate(ctx context.Context) error {
 
 		CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant_id
 			ON webhook_deliveries (tenant_id, created_at DESC);
+
+		-- ── Phase 4: queued status index ────────────────────────────────────────────
+		-- Allow queued rows to be found efficiently (workers pick them up on restart
+		-- if the process crashed before the Redis message was ACKed).
+		CREATE INDEX IF NOT EXISTS idx_notifications_queued
+			ON notifications (created_at ASC)
+			WHERE status = 'queued';
 	`)
 	return err
+}
+
+// CreateQueued inserts a notification row with status='queued' and returns
+// the persisted record.  Called by the HTTP handler immediately before
+// enqueueing the job to Redis so the row exists before any worker runs.
+func (s *Store) CreateQueued(ctx context.Context, rec NotificationRecord) (NotificationRecord, error) {
+	var out NotificationRecord
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO notifications
+			(tenant_id, request_id, recipient, channel, message, status,
+			 error_message, attempts, fallback_used, idempotency_key, was_cached_response,
+			 discord_recipient, email_recipient)
+		VALUES ($1, $2, $3, $4, $5, 'queued',
+			'', 0, false, $6, false,
+			$7, $8)
+		RETURNING id, tenant_id, request_id, recipient, channel, message, status,
+				  error_message, attempts, fallback_used, idempotency_key,
+				  was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+	`, rec.TenantID, rec.RequestID, rec.Recipient, rec.Channel, rec.Message,
+		rec.IdempotencyKey, rec.DiscordRecipient, rec.EmailRecipient,
+	).Scan(
+		&out.ID, &out.TenantID, &out.RequestID, &out.Recipient, &out.Channel, &out.Message, &out.Status,
+		&out.ErrorMessage, &out.Attempts, &out.FallbackUsed, &out.IdempotencyKey,
+		&out.WasCachedResponse, &out.CreatedAt, &out.ScheduledFor, &out.DiscordRecipient, &out.EmailRecipient,
+	)
+	if err != nil {
+		return NotificationRecord{}, fmt.Errorf("store: failed to create queued notification: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) CreateTemplate(ctx context.Context, tenantID, name, body string) (TemplateRecord, error) {

@@ -13,24 +13,14 @@ import (
 
 	"log/slog"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
 	"relayhub/internal/middleware"
+	"relayhub/internal/queue"
 	"relayhub/internal/router"
-	"relayhub/internal/service/notify_service"
 	"relayhub/internal/store"
 )
-
-type stubNotifyService struct {
-	lastReq notify_service.Request
-}
-
-func (s *stubNotifyService) Send(_ context.Context, req notify_service.Request) (notify_service.Response, error) {
-	s.lastReq = req
-	return notify_service.Response{
-		RequestID: "stub-req-id",
-		Status:    "delivered",
-		Channel:   req.Channel,
-	}, nil
-}
 
 func openRouterDB(t *testing.T) *store.Store {
 	t.Helper()
@@ -46,11 +36,25 @@ func openRouterDB(t *testing.T) *store.Store {
 	return db
 }
 
-func newTestServer(db *store.Store, svc notify_service.NotifyService) http.Handler {
+func newTestServer(t *testing.T, db *store.Store) http.Handler {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis.Run: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	q := queue.NewFromClient(rdb)
+	if err := q.EnsureGroup(context.Background()); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+
 	return router.New(router.Config{
-		NotifyService: svc,
-		Store:         db,
-		Logger:        slog.Default(),
+		Store:     db,
+		Logger:    slog.Default(),
+		Queue:     q,
+		IdemStore: store.NewInMemoryIdempotencyStore(),
 	})
 }
 
@@ -108,8 +112,7 @@ func createTemplate(t *testing.T, db *store.Store, tenantID, name, body string) 
 
 func TestHandleCreateTemplate_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	body := map[string]string{
@@ -129,8 +132,7 @@ func TestHandleCreateTemplate_OK(t *testing.T) {
 
 func TestHandleCreateTemplate_InvalidName(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/templates", key, map[string]string{
@@ -144,8 +146,7 @@ func TestHandleCreateTemplate_InvalidName(t *testing.T) {
 
 func TestHandleCreateTemplate_BodyTooLong(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	longBody := make([]byte, 4001)
@@ -163,8 +164,7 @@ func TestHandleCreateTemplate_BodyTooLong(t *testing.T) {
 
 func TestHandleCreateTemplate_Duplicate_Returns409(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	payload := map[string]string{"name": "duplicate_tmpl", "body": "hello"}
@@ -177,8 +177,7 @@ func TestHandleCreateTemplate_Duplicate_Returns409(t *testing.T) {
 
 func TestHandleListTemplates_TenantIsolation(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 
 	tenantAID, keyA := createTenantAndKey(t, db)
 	_, keyB := createTenantAndKey(t, db)
@@ -207,8 +206,7 @@ func TestHandleListTemplates_TenantIsolation(t *testing.T) {
 
 func TestHandleGetTemplate_NotFound(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "GET", "/v1/templates/ghost", key, nil)
@@ -219,8 +217,7 @@ func TestHandleGetTemplate_NotFound(t *testing.T) {
 
 func TestHandleUpdateTemplate_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "editable", "old body")
@@ -240,8 +237,7 @@ func TestHandleUpdateTemplate_OK(t *testing.T) {
 
 func TestHandleDeleteTemplate_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "gone", "bye")
@@ -259,8 +255,7 @@ func TestHandleDeleteTemplate_OK(t *testing.T) {
 
 func TestHandleDeleteTemplate_NotFound(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "DELETE", "/v1/templates/no_such_thing", key, nil)
@@ -271,9 +266,8 @@ func TestHandleDeleteTemplate_NotFound(t *testing.T) {
 
 func TestNotify_PlainMessage_StillWorks(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
-	_, key := createTenantAndKey(t, db)
+	h := newTestServer(t, db)
+	tenantID, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
 		"channel":   "email",
@@ -283,15 +277,26 @@ func TestNotify_PlainMessage_StillWorks(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	if svc.lastReq.Message != "Hello plain world!" {
-		t.Errorf("message not passed through: %q", svc.lastReq.Message)
+
+	resp := decodeResponse(t, w)
+	data, _ := resp["data"].(map[string]any)
+	reqID, _ := data["request_id"].(string)
+	if reqID == "" {
+		t.Fatal("expected request_id in response data")
+	}
+
+	rec, err := db.GetNotificationByRequestID(context.Background(), tenantID, reqID)
+	if err != nil {
+		t.Fatalf("GetNotificationByRequestID: %v", err)
+	}
+	if rec.Message != "Hello plain world!" {
+		t.Errorf("message not passed through: %q", rec.Message)
 	}
 }
 
 func TestNotify_WithTemplate_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "order_shipped",
@@ -310,16 +315,24 @@ func TestNotify_WithTemplate_OK(t *testing.T) {
 		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 
+	resp := decodeResponse(t, w)
+	data, _ := resp["data"].(map[string]any)
+	reqID, _ := data["request_id"].(string)
+
+	rec, err := db.GetNotificationByRequestID(context.Background(), tenantID, reqID)
+	if err != nil {
+		t.Fatalf("GetNotificationByRequestID: %v", err)
+	}
+
 	want := "Hi Ali, your order 4471 has shipped!"
-	if svc.lastReq.Message != want {
-		t.Errorf("substituted message wrong: got %q, want %q", svc.lastReq.Message, want)
+	if rec.Message != want {
+		t.Errorf("substituted message wrong: got %q, want %q", rec.Message, want)
 	}
 }
 
 func TestNotify_WithTemplate_MissingVar_Returns400(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "needs_vars", "Hello {{name}}, code is {{code}}.")
@@ -353,8 +366,7 @@ func TestNotify_WithTemplate_MissingVar_Returns400(t *testing.T) {
 
 func TestNotify_WithTemplate_NotFound_Returns404(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
@@ -370,8 +382,7 @@ func TestNotify_WithTemplate_NotFound_Returns404(t *testing.T) {
 
 func TestNotify_BothMessageAndTemplate_Returns400(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
@@ -387,8 +398,7 @@ func TestNotify_BothMessageAndTemplate_Returns400(t *testing.T) {
 
 func TestNotify_TenantCannotUseOtherTenantTemplate(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 
 	tenantAID, _ := createTenantAndKey(t, db)
 	_, keyB := createTenantAndKey(t, db)
@@ -408,8 +418,7 @@ func TestNotify_TenantCannotUseOtherTenantTemplate(t *testing.T) {
 
 func TestNotify_WithTemplate_NoVariables_NoPlaceholders(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "static_msg", "This is a static message.")
@@ -426,8 +435,7 @@ func TestNotify_WithTemplate_NoVariables_NoPlaceholders(t *testing.T) {
 
 func TestTemplateEndpoints_RequireAuth(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 
 	endpoints := []struct {
 		method string

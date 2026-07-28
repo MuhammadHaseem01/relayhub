@@ -3,6 +3,7 @@ package router
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,7 +13,7 @@ import (
 	"time"
 
 	"relayhub/internal/middleware"
-	"relayhub/internal/service/notify_service"
+	"relayhub/internal/queue"
 	"relayhub/internal/store"
 	"relayhub/internal/webhook"
 
@@ -22,27 +23,30 @@ import (
 const maxScheduleAhead = 30 * 24 * time.Hour
 
 type Config struct {
-	NotifyService notify_service.NotifyService
-	Store         *store.Store
-	Logger        *slog.Logger
-	Dispatcher    *webhook.Dispatcher
+	Store      *store.Store
+	Logger     *slog.Logger
+	Dispatcher *webhook.Dispatcher
+	Queue      *queue.Queue
+	IdemStore  store.IdempotencyStore
 }
 
 type Server struct {
-	notify      notify_service.NotifyService
 	store       *store.Store
 	logger      *slog.Logger
 	rateLimiter *middleware.InMemoryRateLimiter
 	dispatcher  *webhook.Dispatcher
+	queue       *queue.Queue
+	idemStore   store.IdempotencyStore
 }
 
 func New(cfg Config) http.Handler {
 	s := &Server{
-		notify:      cfg.NotifyService,
 		store:       cfg.Store,
 		logger:      cfg.Logger,
 		rateLimiter: middleware.NewInMemoryRateLimiter(24 * time.Hour),
 		dispatcher:  cfg.Dispatcher,
+		queue:       cfg.Queue,
+		idemStore:   cfg.IdemStore,
 	}
 	return s.withMiddleware(s.routes())
 }
@@ -276,32 +280,75 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := s.notify.Send(r.Context(), notify_service.Request{
-		TenantID:            tenant.ID,
-		Recipient:           req.Recipient,
-		DiscordRecipient:    req.DiscordRecipient,
-		EmailRecipient:      req.EmailRecipient,
-		Message:             req.Message,
-		Channel:             req.Channel,
-		IdempotencyKey:      req.IdempotencyKey,
-		TenantWebhookURL:    tenant.WebhookURL,
-		TenantWebhookSecret: tenant.WebhookSecret,
+	requestID := uuid.New().String()
+	log := s.logger.With("request_id", requestID, "channel", req.Channel)
+
+	if req.IdempotencyKey != "" {
+		record, exists := s.idemStore.GetOrCreate(req.IdempotencyKey)
+		if exists {
+			if record.InProgress {
+				writeError(w, http.StatusConflict,
+					"idempotency: a request with this key is currently being processed")
+				return
+			}
+			log.Info("serving from idempotency cache", "key", req.IdempotencyKey)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(record.StatusCode)
+			_, _ = w.Write(record.Body)
+			return
+		}
+	}
+
+	queuedRec, err := s.store.CreateQueued(r.Context(), store.NotificationRecord{
+		TenantID:         tenant.ID,
+		RequestID:        requestID,
+		Recipient:        req.Recipient,
+		Channel:          req.Channel,
+		Message:          req.Message,
+		IdempotencyKey:   req.IdempotencyKey,
+		DiscordRecipient: req.DiscordRecipient,
+		EmailRecipient:   req.EmailRecipient,
 	})
-
-	if err != nil && err.Error() == "idempotency: a request with this key is currently being processed" {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"success": false,
-			"data":    resp,
-		})
+		log.Error("failed to write queued row", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to accept notification")
 		return
 	}
 
-	writeCreated(w, resp)
+	if err := s.queue.Enqueue(r.Context(), queue.NotificationJob{
+		RequestID:        queuedRec.RequestID,
+		TenantID:         tenant.ID,
+		Channel:          req.Channel,
+		Recipient:        req.Recipient,
+		Message:          req.Message,
+		IdempotencyKey:   req.IdempotencyKey,
+		DiscordRecipient: req.DiscordRecipient,
+		EmailRecipient:   req.EmailRecipient,
+	}); err != nil {
+		log.Error("failed to enqueue notification", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to enqueue notification")
+		return
+	}
+
+	log.Info("notification queued")
+
+	respBody := map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"request_id": requestID,
+			"status":     "queued",
+		},
+	}
+
+	if req.IdempotencyKey != "" {
+		body, _ := json.Marshal(respBody)
+		s.idemStore.Save(req.IdempotencyKey, http.StatusCreated, body)
+	}
+
+	writeCreated(w, map[string]any{
+		"request_id": requestID,
+		"status":     "queued",
+	})
 }
 
 func (s *Server) handleGetNotification(w http.ResponseWriter, r *http.Request) {
