@@ -18,8 +18,7 @@ func ctxWithTimeout(t *testing.T) context.Context {
 
 func TestNotify_SendAt_Future_Returns202(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	sendAt := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
@@ -44,17 +43,12 @@ func TestNotify_SendAt_Future_Returns202(t *testing.T) {
 	if data["scheduled_for"] == "" {
 		t.Error("expected non-empty scheduled_for")
 	}
-
-	if svc.lastReq.Message != "" {
-		t.Error("expected no send call for scheduled notification")
-	}
 }
 
 func TestNotify_SendAt_Past_SendsImmediately(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
-	_, key := createTenantAndKey(t, db)
+	h := newTestServer(t, db)
+	tenantID, key := createTenantAndKey(t, db)
 
 	pastTime := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
@@ -66,15 +60,22 @@ func TestNotify_SendAt_Past_SendsImmediately(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	if svc.lastReq.Message != "should send now" {
-		t.Errorf("message not forwarded: %q", svc.lastReq.Message)
+	resp := decodeResponse(t, w)
+	data, _ := resp["data"].(map[string]any)
+	reqID, _ := data["request_id"].(string)
+
+	rec, err := db.GetNotificationByRequestID(context.Background(), tenantID, reqID)
+	if err != nil {
+		t.Fatalf("GetNotificationByRequestID: %v", err)
+	}
+	if rec.Message != "should send now" {
+		t.Errorf("message not forwarded: %q", rec.Message)
 	}
 }
 
 func TestNotify_SendAt_Omitted_SendsImmediately(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
@@ -89,8 +90,7 @@ func TestNotify_SendAt_Omitted_SendsImmediately(t *testing.T) {
 
 func TestNotify_SendAt_TooFarFuture_Returns400(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	tooFar := time.Now().Add(31 * 24 * time.Hour).UTC().Format(time.RFC3339)
@@ -107,8 +107,7 @@ func TestNotify_SendAt_TooFarFuture_Returns400(t *testing.T) {
 
 func TestNotify_SendAt_InvalidFormat_Returns400(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "POST", "/v1/notify", key, map[string]any{
@@ -124,8 +123,7 @@ func TestNotify_SendAt_InvalidFormat_Returns400(t *testing.T) {
 
 func TestNotify_WithTemplateAndSendAt_MessageRenderedAtRequestTime(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	createTemplate(t, db, tenantID, "sched_tmpl", "Hello {{name}}!")
@@ -157,8 +155,7 @@ func TestNotify_WithTemplateAndSendAt_MessageRenderedAtRequestTime(t *testing.T)
 
 func TestGetNotification_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	futureTime := time.Now().Add(2 * time.Hour)
@@ -190,8 +187,7 @@ func TestGetNotification_OK(t *testing.T) {
 
 func TestGetNotification_TenantIsolation_Returns404(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantAID, _ := createTenantAndKey(t, db)
 	_, keyB := createTenantAndKey(t, db)
 
@@ -213,8 +209,7 @@ func TestGetNotification_TenantIsolation_Returns404(t *testing.T) {
 
 func TestGetNotification_NotFound_Returns404(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "GET", "/v1/notify/totally-fake-id", key, nil)
@@ -225,8 +220,7 @@ func TestGetNotification_NotFound_Returns404(t *testing.T) {
 
 func TestCancelNotification_OK_Returns204(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	futureTime := time.Now().Add(2 * time.Hour)
@@ -252,8 +246,7 @@ func TestCancelNotification_OK_Returns204(t *testing.T) {
 
 func TestCancelNotification_AlreadySent_Returns409(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantID, key := createTenantAndKey(t, db)
 
 	pastTime := time.Now().Add(-1 * time.Minute)
@@ -276,8 +269,7 @@ func TestCancelNotification_AlreadySent_Returns409(t *testing.T) {
 
 func TestCancelNotification_NotFound_Returns404(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	_, key := createTenantAndKey(t, db)
 
 	w := doRequest(t, h, "DELETE", "/v1/notify/no-such-id", key, nil)
@@ -288,8 +280,7 @@ func TestCancelNotification_NotFound_Returns404(t *testing.T) {
 
 func TestCancelNotification_TenantIsolation_Returns404(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 	tenantAID, _ := createTenantAndKey(t, db)
 	_, keyB := createTenantAndKey(t, db)
 
@@ -311,8 +302,7 @@ func TestCancelNotification_TenantIsolation_Returns404(t *testing.T) {
 
 func TestScheduleEndpoints_RequireAuth(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	h := newTestServer(db, svc)
+	h := newTestServer(t, db)
 
 	endpoints := []struct{ method, path string }{
 		{"GET", "/v1/notify/some-id"},

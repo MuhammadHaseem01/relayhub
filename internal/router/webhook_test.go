@@ -15,8 +15,7 @@ func uniqueWebhookName(prefix string) string {
 
 func TestSetWebhook_OK(t *testing.T) {
 	db := openRouterDB(t)
-	svc := &stubNotifyService{}
-	handler := newTestServer(db, svc)
+	handler := newTestServer(t, db)
 
 	_, apiKey := createTenantAndKey(t, db)
 
@@ -52,7 +51,7 @@ func TestSetWebhook_OK(t *testing.T) {
 
 func TestSetWebhook_RequiresHTTPS(t *testing.T) {
 	db := openRouterDB(t)
-	handler := newTestServer(db, &stubNotifyService{})
+	handler := newTestServer(t, db)
 	_, apiKey := createTenantAndKey(t, db)
 
 	w := doRequest(t, handler, http.MethodPut, "/v1/webhook", apiKey, map[string]string{
@@ -65,7 +64,7 @@ func TestSetWebhook_RequiresHTTPS(t *testing.T) {
 
 func TestDeleteWebhook_OK(t *testing.T) {
 	db := openRouterDB(t)
-	handler := newTestServer(db, &stubNotifyService{})
+	handler := newTestServer(t, db)
 	tenantID, apiKey := createTenantAndKey(t, db)
 
 	doRequest(t, handler, http.MethodPut, "/v1/webhook", apiKey, map[string]string{
@@ -88,7 +87,7 @@ func TestDeleteWebhook_OK(t *testing.T) {
 
 func TestGetWebhookDeliveries_OK(t *testing.T) {
 	db := openRouterDB(t)
-	handler := newTestServer(db, &stubNotifyService{})
+	handler := newTestServer(t, db)
 	_, apiKey := createTenantAndKey(t, db)
 
 	w := doRequest(t, handler, http.MethodGet, "/v1/webhook/deliveries", apiKey, nil)
@@ -107,7 +106,7 @@ func TestGetWebhookDeliveries_OK(t *testing.T) {
 
 func TestSetWebhook_Unauthorized(t *testing.T) {
 	db := openRouterDB(t)
-	handler := newTestServer(db, &stubNotifyService{})
+	handler := newTestServer(t, db)
 
 	w := doRequest(t, handler, http.MethodPut, "/v1/webhook", "", map[string]string{
 		"webhook_url": "https://example.com/events",

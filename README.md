@@ -6,6 +6,19 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 4 — Async Queue & Background Workers (Step 1 complete ✅)
+
+| Feature | Status |
+|---|---|
+| `POST /v1/notify` async processing — returns instant `201 Created` with `status: "queued"` | ✅ |
+| Redis Streams queue engine (`relayhub:notifications` stream, `relayhub-workers` group) | ✅ |
+| `WORKER_COUNT` configurable background worker pool (default: 5 goroutines) | ✅ |
+| XREADGROUP consumer group processing with automatic XACK after delivery write | ✅ |
+| Periodic worker crash recovery via `XAUTOCLAIM` (reclaims jobs idle > 90 s every 60 s) | ✅ |
+| Shared delivery engine (`dispatch.Executor.Run`) — zero code duplication across workers and scheduler | ✅ |
+| Status query (`GET /v1/notify/:request_id`) — track delivery progress from `queued` to `delivered`/`failed` | ✅ |
+| Seamless docker-compose integration with `redis:7-alpine` | ✅ |
+
 ## Phase 3 — SMTP Provider (Step 4 complete ✅)
 
 | Feature | Status |
@@ -442,24 +455,25 @@ If a placeholder in the template has no matching key in `variables`, the request
 { "success": false, "error": "provide either 'message' or 'template', not both" }
 ```
 
-**Success response (201):**
+**Success response (201 Created):**
+Notifications are validated (auth, rate limits, template rendering, idempotency) and written to Postgres with `status: "queued"`, then enqueued into Redis Streams for background worker pickup. The API returns **instantly** without waiting for network provider delivery:
 ```json
 {
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status":     "delivered",
-  "channel":    "email"
+  "success": true,
+  "data": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status":     "queued"
+  }
 }
 ```
 
-**Failure response (502):**
-```json
-{
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status":     "failed",
-  "channel":    "discord",
-  "error":      "discord: webhook not found (404) — check the webhook URL"
-}
-```
+#### Async Delivery & Worker Pool
+
+1. **Queueing:** `POST /v1/notify` validates the request, writes a `status = 'queued'` notification record, pushes a job to Redis Stream `relayhub:notifications`, and returns `201 Created` immediately.
+2. **Worker Processing:** Background worker goroutines (`WORKER_COUNT`, default 5) consume jobs from consumer group `relayhub-workers` using `XREADGROUP`.
+3. **Execution:** Workers run the delivery attempt via `dispatch.Executor` (handles retries, exponential back-off, channel fallbacks, Postgres status updates, and outbound webhooks), then issue `XACK`.
+4. **Crash Recovery:** A background reclaimer process runs every 60 seconds using `XAUTOCLAIM` to re-assign any unacknowledged jobs idle for >90 seconds (protecting against worker crashes).
+5. **Checking Final Status:** Call `GET /v1/notify/:request_id` to inspect the final delivery state (`delivered` or `failed`).
 
 ---
 
