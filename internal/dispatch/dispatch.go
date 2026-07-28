@@ -78,13 +78,15 @@ func (e *Executor) Run(ctx context.Context, job Job) error {
 		log.Info("notification delivered", "channel", finalChannel)
 	}
 
-	if err := e.Store.UpdateNotificationStatus(
-		ctx, job.RequestID, finalStatus, finalErrMsg, totalAttempts, fallbackUsed,
-	); err != nil {
-		log.Error("dispatch: failed to update notification status", "error", err)
+	if e.Store != nil {
+		if err := e.Store.UpdateNotificationStatus(
+			ctx, job.RequestID, finalStatus, finalErrMsg, totalAttempts, fallbackUsed,
+		); err != nil {
+			log.Error("dispatch: failed to update notification status", "error", err)
+		}
 	}
 
-	if e.Dispatcher != nil {
+	if e.Dispatcher != nil && e.Store != nil {
 		tenant, err := e.Store.GetTenantByID(ctx, job.TenantID)
 		if err != nil {
 			log.Warn("dispatch: failed to load tenant for webhook", "error", err)
