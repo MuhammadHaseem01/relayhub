@@ -1,4 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import {
+  Send,
+  FileJson,
+  Copy,
+  Check,
+  RefreshCw,
+  Sparkles,
+  AlertTriangle,
+  Clock
+} from 'lucide-react';
 import { sendNotification, getNotificationStatus, type SendNotifyRequest, type NotificationLog } from '../api/client';
 
 interface SendPageProps {
@@ -17,6 +27,7 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
   const [submitting, setSubmitting] = useState(false);
   const [rawResponse, setRawResponse] = useState<string | null>(null);
   const [lastRequestId, setLastRequestId] = useState<string | null>(null);
+  const [copiedJson, setCopiedJson] = useState(false);
 
   // Live status tracking
   const [trackedStatus, setTrackedStatus] = useState<NotificationLog | null>(null);
@@ -50,7 +61,6 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
     }
 
     if (sendAt) {
-      // Convert datetime-local value to ISO UTC string
       payload.send_at = new Date(sendAt).toISOString();
     }
 
@@ -110,13 +120,23 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
     }
   };
 
+  const handleCopyJson = () => {
+    if (rawResponse) {
+      navigator.clipboard.writeText(rawResponse);
+      setCopiedJson(true);
+      onShowToast('JSON copied to clipboard', 'success');
+      setTimeout(() => setCopiedJson(false), 2000);
+    }
+  };
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', alignItems: 'start' }}>
       {/* Send Form Column */}
       <div className="card">
-        <h3 style={{ fontSize: '16px', marginBottom: '16px', borderBottom: '1px solid var(--border)', paddingBottom: '10px' }}>
-          Dispatch Notification
-        </h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', borderBottom: '1px solid var(--border)', paddingBottom: '12px' }}>
+          <Send size={18} style={{ color: 'var(--accent)' }} />
+          <h3 style={{ fontSize: '16px', margin: 0 }}>Dispatch Notification</h3>
+        </div>
 
         <form onSubmit={handleSubmit}>
           {/* Channel Selector */}
@@ -206,7 +226,8 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
                 onChange={(e) => setIdempotencyKey(e.target.value)}
               />
               <button type="button" className="btn btn-sm" onClick={handleGenerateUUID}>
-                UUID
+                <Sparkles size={14} />
+                <span>UUID</span>
               </button>
             </div>
             <span className="form-hint">Prevents duplicate sending if retried within 24h.</span>
@@ -230,7 +251,8 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
             style={{ width: '100%', marginTop: '8px' }}
             disabled={submitting}
           >
-            {submitting ? 'Dispatching...' : '🚀 Send Notification'}
+            <Send size={16} />
+            <span>{submitting ? 'Dispatching...' : 'Send Notification'}</span>
           </button>
         </form>
       </div>
@@ -241,17 +263,21 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
         {lastRequestId && (
           <div className="card" style={{ borderColor: 'var(--border-strong)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <h4 style={{ fontSize: '14px', margin: 0 }}>Live Delivery Inspector</h4>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Clock size={16} style={{ color: 'var(--accent)' }} />
+                <h4 style={{ fontSize: '14px', margin: 0 }}>Live Delivery Inspector</h4>
+              </div>
               {polling ? (
-                <span className="badge badge-warning" style={{ animation: 'pulse 1.5s infinite' }}>
+                <span className="badge badge-warning">
                   ● Polling status...
                 </span>
               ) : (
                 <button
-                  className="btn btn-sm"
+                  className="btn btn-sm btn-ghost"
                   onClick={() => startPollingStatus(lastRequestId)}
                 >
-                  Refresh Status
+                  <RefreshCw size={14} />
+                  <span>Refresh</span>
                 </button>
               )}
             </div>
@@ -275,8 +301,9 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
                     <code>{trackedStatus.attempts}</code>
                   </div>
                   {trackedStatus.fallback_used && (
-                    <div style={{ color: 'var(--warning)' }}>
-                      ⚠️ Fallback channel was utilized for this delivery
+                    <div style={{ color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <AlertTriangle size={14} />
+                      <span>Fallback channel was utilized for this delivery</span>
                     </div>
                   )}
                   {trackedStatus.error_message && (
@@ -297,35 +324,42 @@ export const SendPage: React.FC<SendPageProps> = ({ onShowToast }) => {
         )}
 
         {/* Raw Response Panel */}
-        <div className="card">
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', minHeight: '280px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-            <h4 style={{ fontSize: '14px', margin: 0 }}>Raw API Response</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <FileJson size={16} style={{ color: 'var(--accent)' }} />
+              <h4 style={{ fontSize: '14px', margin: 0 }}>Raw API Response</h4>
+            </div>
             {rawResponse && (
-              <button
-                className="btn btn-sm"
-                onClick={() => {
-                  navigator.clipboard.writeText(rawResponse);
-                  onShowToast('JSON copied to clipboard', 'success');
-                }}
-              >
-                Copy JSON
+              <button className="btn btn-sm btn-ghost" onClick={handleCopyJson}>
+                {copiedJson ? <Check size={14} style={{ color: 'var(--success)' }} /> : <Copy size={14} />}
+                <span>{copiedJson ? 'Copied' : 'Copy JSON'}</span>
               </button>
             )}
           </div>
 
-          <pre style={{
-            backgroundColor: 'var(--bg)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)',
-            padding: '12px',
-            fontSize: '12px',
-            color: rawResponse ? 'var(--accent)' : 'var(--text-faint)',
-            overflowX: 'auto',
-            minHeight: '180px',
-            maxHeight: '360px'
-          }}>
-            {rawResponse || '// API JSON response will appear here after submission...'}
-          </pre>
+          {rawResponse ? (
+            <pre style={{
+              backgroundColor: 'var(--bg)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '14px',
+              fontSize: '12px',
+              color: 'var(--accent)',
+              overflowX: 'auto',
+              flex: 1,
+              maxHeight: '360px'
+            }}>
+              {rawResponse}
+            </pre>
+          ) : (
+            <div className="empty-state" style={{ flex: 1 }}>
+              <FileJson size={36} className="empty-state-icon" />
+              <p className="empty-state-text">
+                Send a notification to see the raw API JSON response payload here.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>
