@@ -15,6 +15,7 @@ var ErrDuplicateTemplate = errors.New("store: template name already exists for t
 var ErrTemplateNotFound = errors.New("store: template not found")
 var ErrNotificationNotFound = errors.New("store: notification not found")
 var ErrNotificationAlreadySent = errors.New("store: notification already sent or cancelled")
+var ErrNotDeadLetter = errors.New("store: notification is not dead_letter")
 var ErrTenantNotFound = errors.New("store: tenant not found")
 
 type TenantRecord struct {
@@ -185,6 +186,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_notifications_queued
 			ON notifications (created_at ASC)
 			WHERE status = 'queued';
+
+		CREATE INDEX IF NOT EXISTS idx_notifications_dead_letter
+			ON notifications (tenant_id, created_at DESC)
+			WHERE status = 'dead_letter';
 	`)
 	return err
 }
@@ -643,6 +648,78 @@ func (s *Store) GetTenantUsage(ctx context.Context, tenantID string) (TenantUsag
 	}
 	usage.OldestAt = oldest
 	return usage, nil
+}
+
+func (s *Store) GetDeadLetterNotifications(ctx context.Context, tenantID string, limit int) ([]NotificationRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, request_id, recipient, channel, message, status,
+		       error_message, attempts, fallback_used, idempotency_key,
+		       was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+		FROM notifications
+		WHERE tenant_id = $1 AND status = 'dead_letter'
+		ORDER BY created_at DESC
+		LIMIT $2
+	`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: failed to query dead letter notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var records []NotificationRecord
+	for rows.Next() {
+		var r NotificationRecord
+		var sf *time.Time
+		if err := rows.Scan(
+			&r.ID, &r.TenantID, &r.RequestID, &r.Recipient, &r.Channel,
+			&r.Message, &r.Status, &r.ErrorMessage, &r.Attempts,
+			&r.FallbackUsed, &r.IdempotencyKey, &r.WasCachedResponse, &r.CreatedAt,
+			&sf, &r.DiscordRecipient, &r.EmailRecipient,
+		); err != nil {
+			return nil, fmt.Errorf("store: dead letter row scan error: %w", err)
+		}
+		r.ScheduledFor = sf
+		records = append(records, r)
+	}
+	if records == nil {
+		records = []NotificationRecord{}
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) ResetDeadLetter(ctx context.Context, tenantID, requestID string) (NotificationRecord, error) {
+	r, err := s.GetNotificationByRequestID(ctx, tenantID, requestID)
+	if err != nil {
+		return NotificationRecord{}, err
+	}
+	if r.Status != "dead_letter" {
+		return NotificationRecord{}, ErrNotDeadLetter
+	}
+
+	var out NotificationRecord
+	var sf *time.Time
+	err = s.pool.QueryRow(ctx, `
+		UPDATE notifications
+		SET status = 'queued', error_message = '', attempts = 0, fallback_used = false
+		WHERE request_id = $1 AND tenant_id = $2 AND status = 'dead_letter'
+		RETURNING id, tenant_id, request_id, recipient, channel, message, status,
+				  error_message, attempts, fallback_used, idempotency_key,
+				  was_cached_response, created_at, scheduled_for, discord_recipient, email_recipient
+	`, requestID, tenantID).Scan(
+		&out.ID, &out.TenantID, &out.RequestID, &out.Recipient, &out.Channel, &out.Message, &out.Status,
+		&out.ErrorMessage, &out.Attempts, &out.FallbackUsed, &out.IdempotencyKey,
+		&out.WasCachedResponse, &out.CreatedAt, &sf, &out.DiscordRecipient, &out.EmailRecipient,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NotificationRecord{}, ErrNotDeadLetter
+		}
+		return NotificationRecord{}, fmt.Errorf("store: failed to reset dead letter status: %w", err)
+	}
+	out.ScheduledFor = sf
+	return out, nil
 }
 
 func (s *Store) Close() {

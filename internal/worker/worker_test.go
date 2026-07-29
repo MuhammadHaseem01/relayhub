@@ -15,6 +15,7 @@ import (
 	"relayhub/internal/dispatch"
 	"relayhub/internal/providers"
 	"relayhub/internal/queue"
+	"relayhub/internal/retry"
 	"relayhub/internal/worker"
 )
 
@@ -209,5 +210,45 @@ func TestReclaimer_ClaimsOrphanedMessages(t *testing.T) {
 	}
 	if reclaimed[0].Job.RequestID != "orphan-req-001" {
 		t.Errorf("unexpected RequestID: %q", reclaimed[0].Job.RequestID)
+	}
+}
+
+func TestWorker_DLQAfterMaxAttempts(t *testing.T) {
+	q, _, _ := setupQueue(t)
+	ctx := context.Background()
+
+	sender := &mockSender{name: "email", failErr: errors.New("provider down")}
+	exec := &dispatch.Executor{
+		Providers:         map[string]providers.Sender{"email": sender},
+		Retry:             retry.WithRetry,
+		MaxAttempts:       1,
+		MaxWorkerAttempts: 3,
+		Queue:             q,
+		Logger:            noopLogger(),
+	}
+
+	job := dispatch.Job{
+		RequestID:      "dlq-req-999",
+		TenantID:       "tenant-dlq",
+		Channel:        "email",
+		Recipient:      "dead@example.com",
+		Message:        "perma fail",
+		WorkerAttempts: 3, // Already reached max worker attempts
+	}
+
+	err := exec.Run(ctx, job)
+	if err == nil {
+		t.Fatal("expected error from dispatch when job is dead-lettered")
+	}
+
+	dlqMsgs, err := q.ReadDLQ(ctx, "tenant-dlq", 10)
+	if err != nil {
+		t.Fatalf("ReadDLQ: %v", err)
+	}
+	if len(dlqMsgs) != 1 {
+		t.Fatalf("expected 1 msg in DLQ, got %d", len(dlqMsgs))
+	}
+	if dlqMsgs[0].Job.RequestID != "dlq-req-999" {
+		t.Errorf("expected request_id dlq-req-999, got %q", dlqMsgs[0].Job.RequestID)
 	}
 }
