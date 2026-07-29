@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"relayhub/internal/health"
 	"relayhub/internal/middleware"
 	"relayhub/internal/queue"
 	"relayhub/internal/store"
@@ -28,6 +29,7 @@ type Config struct {
 	Dispatcher *webhook.Dispatcher
 	Queue      *queue.Queue
 	IdemStore  store.IdempotencyStore
+	Health     *health.Registry
 }
 
 type Server struct {
@@ -37,6 +39,7 @@ type Server struct {
 	dispatcher  *webhook.Dispatcher
 	queue       *queue.Queue
 	idemStore   store.IdempotencyStore
+	health      *health.Registry
 }
 
 func New(cfg Config) http.Handler {
@@ -47,6 +50,7 @@ func New(cfg Config) http.Handler {
 		dispatcher:  cfg.Dispatcher,
 		queue:       cfg.Queue,
 		idemStore:   cfg.IdemStore,
+		health:      cfg.Health,
 	}
 	return s.withMiddleware(s.routes())
 }
@@ -55,12 +59,15 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /v1/health/providers", s.handleProviderHealth)
 	mux.HandleFunc("POST /v1/tenants", s.handleRegisterTenant)
 
 	auth := middleware.Auth(s.store)
 	rl := middleware.RateLimit(s.rateLimiter)
 
 	mux.Handle("POST /v1/notify", auth(rl(http.HandlerFunc(s.handleSend))))
+	mux.Handle("GET /v1/notify/dead-letter", auth(http.HandlerFunc(s.handleListDeadLetter)))
+	mux.Handle("POST /v1/notify/{request_id}/replay", auth(http.HandlerFunc(s.handleReplayNotification)))
 	mux.Handle("GET /v1/notify/{request_id}", auth(http.HandlerFunc(s.handleGetNotification)))
 	mux.Handle("DELETE /v1/notify/{request_id}", auth(http.HandlerFunc(s.handleCancelNotification)))
 
@@ -99,6 +106,18 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]string{"status": "ok", "service": "relayhub"})
+}
+
+func (s *Server) handleProviderHealth(w http.ResponseWriter, r *http.Request) {
+	if s.health == nil {
+		writeOK(w, map[string]string{
+			"discord": "healthy",
+			"email":   "healthy",
+			"smtp":    "healthy",
+		})
+		return
+	}
+	writeOK(w, s.health.Snapshot())
 }
 
 type registerTenantRequest struct {
@@ -393,6 +412,78 @@ func (s *Server) handleCancelNotification(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListDeadLetter(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	limit := queryInt(r, "limit", 50)
+	if limit > 200 {
+		limit = 200
+	}
+
+	records, err := s.store.GetDeadLetterNotifications(r.Context(), tenant.ID, limit)
+	if err != nil {
+		s.logger.Error("failed to get dead letter notifications", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch dead letter notifications")
+		return
+	}
+
+	writeOK(w, map[string]any{
+		"count":         len(records),
+		"notifications": records,
+	})
+}
+
+func (s *Server) handleReplayNotification(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	reqID := r.PathValue("request_id")
+	rec, err := s.store.ResetDeadLetter(r.Context(), tenant.ID, reqID)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotificationNotFound):
+			writeError(w, http.StatusNotFound, "notification not found: "+reqID)
+		case errors.Is(err, store.ErrNotDeadLetter):
+			writeError(w, http.StatusConflict, "notification is not in dead_letter status")
+		default:
+			s.logger.Error("failed to reset dead letter status", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to replay notification")
+		}
+		return
+	}
+
+	if s.queue != nil {
+		if err := s.queue.Enqueue(r.Context(), queue.NotificationJob{
+			RequestID:        rec.RequestID,
+			TenantID:         rec.TenantID,
+			Channel:          rec.Channel,
+			Recipient:        rec.Recipient,
+			Message:          rec.Message,
+			IdempotencyKey:   rec.IdempotencyKey,
+			DiscordRecipient: rec.DiscordRecipient,
+			EmailRecipient:   rec.EmailRecipient,
+			WorkerAttempts:   0,
+		}); err != nil {
+			s.logger.Error("failed to re-enqueue replayed job", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to enqueue replayed notification")
+			return
+		}
+	}
+
+	s.logger.Info("dead letter notification replayed", "request_id", reqID)
+	writeOK(w, map[string]any{
+		"request_id": rec.RequestID,
+		"status":     "queued",
+	})
 }
 
 type createTemplateRequest struct {

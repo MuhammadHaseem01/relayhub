@@ -16,6 +16,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
+	"relayhub/internal/health"
 	"relayhub/internal/middleware"
 	"relayhub/internal/queue"
 	"relayhub/internal/router"
@@ -55,6 +56,7 @@ func newTestServer(t *testing.T, db *store.Store) http.Handler {
 		Logger:    slog.Default(),
 		Queue:     q,
 		IdemStore: store.NewInMemoryIdempotencyStore(),
+		Health:    health.NewRegistry([]string{"discord", "email", "smtp"}),
 	})
 }
 

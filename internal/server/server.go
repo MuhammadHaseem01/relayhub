@@ -12,6 +12,7 @@ import (
 
 	"relayhub/internal/config"
 	"relayhub/internal/dispatch"
+	"relayhub/internal/health"
 	"relayhub/internal/providers"
 	"relayhub/internal/queue"
 	"relayhub/internal/retry"
@@ -43,6 +44,8 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 	}
 	logger.Info("connected to redis", "url", cfg.RedisURL)
 
+	healthRegistry := health.NewRegistry([]string{"discord", "email", "smtp"})
+
 	discord := providers.NewDiscordProvider(cfg.DiscordWebhookURL)
 	email := providers.NewEmailProvider(cfg.ResendAPIKey, cfg.FromEmail)
 	smtpProvider := providers.NewSMTPProvider(
@@ -64,12 +67,15 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 	})
 
 	executor := &dispatch.Executor{
-		Providers:   providerMap,
-		Retry:       retry.WithRetry,
-		MaxAttempts: 3,
-		Store:       db,
-		Dispatcher:  whDispatcher,
-		Logger:      logger,
+		Providers:         providerMap,
+		Retry:             retry.WithRetry,
+		MaxAttempts:       3,
+		MaxWorkerAttempts: 3,
+		Store:             db,
+		Dispatcher:        whDispatcher,
+		Queue:             q,
+		Health:            healthRegistry,
+		Logger:            logger,
 	}
 
 	idemStore := store.NewInMemoryIdempotencyStore()
@@ -80,6 +86,7 @@ func Start(cfg *config.Config, logger *slog.Logger) error {
 		Dispatcher: whDispatcher,
 		Queue:      q,
 		IdemStore:  idemStore,
+		Health:     healthRegistry,
 	})
 
 	srv := &http.Server{
