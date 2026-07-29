@@ -3,13 +3,15 @@ package queue
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	StreamName = "relayhub:notifications"
+	StreamName    = "relayhub:notifications"
+	DLQStreamName = "relayhub:notifications:dlq"
 
 	ConsumerGroup = "relayhub-workers"
 
@@ -25,6 +27,7 @@ type NotificationJob struct {
 	IdempotencyKey   string
 	DiscordRecipient string
 	EmailRecipient   string
+	WorkerAttempts   int
 }
 
 type Message struct {
@@ -78,6 +81,44 @@ func (q *Queue) Enqueue(ctx context.Context, job NotificationJob) error {
 	return nil
 }
 
+func (q *Queue) EnqueueDLQ(ctx context.Context, job NotificationJob) error {
+	err := q.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: DLQStreamName,
+		MaxLen: maxStreamLen,
+		Approx: true,
+		Values: jobToMap(job),
+	}).Err()
+	if err != nil {
+		return fmt.Errorf("queue: failed to enqueue job to DLQ %q: %w", job.RequestID, err)
+	}
+	return nil
+}
+
+func (q *Queue) ReadDLQ(ctx context.Context, tenantID string, count int64) ([]Message, error) {
+	if count <= 0 {
+		count = 50
+	}
+	xMsgs, err := q.rdb.XRevRangeN(ctx, DLQStreamName, "+", "-", count*4).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("queue: failed to read DLQ stream: %w", err)
+	}
+
+	var res []Message
+	for _, xm := range xMsgs {
+		job := jobFromMap(xm.Values)
+		if tenantID == "" || job.TenantID == tenantID {
+			res = append(res, Message{ID: xm.ID, Job: job})
+			if int64(len(res)) >= count {
+				break
+			}
+		}
+	}
+	return res, nil
+}
+
 func (q *Queue) Dequeue(
 	ctx context.Context,
 	consumerName string,
@@ -114,16 +155,12 @@ func (q *Queue) Ack(ctx context.Context, streamID string) error {
 	return nil
 }
 
-// Reclaim re-assigns up to count messages that have been pending (unacknowledged)
-// for longer than minIdleTime to consumerName.  This recovers jobs that were
-// claimed by a worker that crashed before ACKing.
 func (q *Queue) Reclaim(
 	ctx context.Context,
 	consumerName string,
 	minIdleTime time.Duration,
 	count int64,
 ) ([]Message, error) {
-	// XAutoClaim returns (messages, nextStartID, error)
 	msgsRaw, _, err := q.rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
 		Stream:   StreamName,
 		Group:    ConsumerGroup,
@@ -152,6 +189,7 @@ func jobToMap(job NotificationJob) map[string]any {
 		"idempotency_key":   job.IdempotencyKey,
 		"discord_recipient": job.DiscordRecipient,
 		"email_recipient":   job.EmailRecipient,
+		"worker_attempts":   strconv.Itoa(job.WorkerAttempts),
 	}
 }
 
@@ -164,6 +202,15 @@ func jobFromMap(vals map[string]any) NotificationJob {
 		}
 		return ""
 	}
+	num := func(key string) int {
+		s := str(key)
+		if s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				return n
+			}
+		}
+		return 0
+	}
 	return NotificationJob{
 		RequestID:        str("request_id"),
 		TenantID:         str("tenant_id"),
@@ -173,5 +220,6 @@ func jobFromMap(vals map[string]any) NotificationJob {
 		IdempotencyKey:   str("idempotency_key"),
 		DiscordRecipient: str("discord_recipient"),
 		EmailRecipient:   str("email_recipient"),
+		WorkerAttempts:   num("worker_attempts"),
 	}
 }
