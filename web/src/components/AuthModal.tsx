@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Zap, PlusCircle, Key, Copy, Check, AlertTriangle } from 'lucide-react';
 import { registerTenant, setApiKey } from '../api/client';
 
 interface AuthModalProps {
@@ -57,25 +58,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
       position: 'fixed',
       inset: 0,
       backgroundColor: 'rgba(13, 17, 23, 0.85)',
-      backdropFilter: 'blur(4px)',
+      backdropFilter: 'blur(6px)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
       zIndex: 1000,
       padding: '20px'
     }}>
-      <div className="card" style={{ width: '100%', maxWidth: '480px', boxShadow: '0 16px 32px rgba(0,0,0,0.6)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px' }}>
+      <div className="card" style={{ width: '100%', maxWidth: '480px', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
           <div style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: '8px',
+            width: '40px',
+            height: '40px',
+            borderRadius: 'var(--radius-md)',
             backgroundColor: '#1f6feb',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '20px'
-          }}>⚡</div>
+            color: '#ffffff'
+          }}>
+            <Zap size={24} />
+          </div>
           <div>
             <h2 style={{ fontSize: '18px', margin: 0 }}>RelayHub Dashboard</h2>
             <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Universal Notification Engine</p>
@@ -91,7 +94,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
               padding: '16px',
               marginBottom: '16px'
             }}>
-              <h4 style={{ color: 'var(--warning)', marginBottom: '6px', fontSize: '14px' }}>⚠️ Save Your API Key Now</h4>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <AlertTriangle size={16} style={{ color: 'var(--warning)' }} />
+                <h4 style={{ color: 'var(--warning)', margin: 0, fontSize: '14px' }}>Save Your API Key Now</h4>
+              </div>
               <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '12px' }}>
                 This key will <strong>never be displayed again</strong>. Copy it and store it in a safe place.
               </p>
@@ -108,7 +114,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
                   {createdKey}
                 </code>
                 <button className="btn btn-sm" onClick={handleCopyKey}>
-                  {copied ? 'Copied!' : 'Copy'}
+                  {copied ? <Check size={14} style={{ color: 'var(--success)' }} /> : <Copy size={14} />}
+                  <span>{copied ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
             </div>
@@ -132,11 +139,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
                   borderBottom: tab === 'create' ? '2px solid var(--accent)' : '2px solid transparent',
                   color: tab === 'create' ? 'var(--text-primary)' : 'var(--text-secondary)',
                   fontWeight: tab === 'create' ? 600 : 400,
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
                 }}
                 onClick={() => { setTab('create'); setError(null); }}
               >
-                Register New Tenant
+                <PlusCircle size={16} />
+                <span>Register Tenant</span>
               </button>
               <button
                 style={{
@@ -147,11 +159,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
                   borderBottom: tab === 'existing' ? '2px solid var(--accent)' : '2px solid transparent',
                   color: tab === 'existing' ? 'var(--text-primary)' : 'var(--text-secondary)',
                   fontWeight: tab === 'existing' ? 600 : 400,
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
                 }}
                 onClick={() => { setTab('existing'); setError(null); }}
               >
-                Existing API Key
+                <Key size={16} />
+                <span>Existing Key</span>
               </button>
             </div>
 
@@ -183,7 +200,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
                   />
                   <span className="form-hint">Registers a new isolated tenant account in RelayHub.</span>
                 </div>
-                <button type="submit" className="btn btn-accent" style={{ width: '100%' }} disabled={loading}>
+                <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
                   {loading ? 'Creating Tenant...' : 'Create Tenant & Get API Key'}
                 </button>
               </form>

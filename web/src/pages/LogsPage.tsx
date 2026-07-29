@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { ScrollText, RefreshCw, Pause, Play, Copy, Check, Inbox } from 'lucide-react';
 import { getLogs, type NotificationLog } from '../api/client';
 
 interface LogsPageProps {
@@ -27,12 +28,10 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
     }
   };
 
-  // Initial fetch + limit change fetch
   useEffect(() => {
     fetchLogs(true);
   }, [limit]);
 
-  // Auto Refresh Polling (5s)
   useEffect(() => {
     if (!autoRefresh) return;
 
@@ -61,7 +60,7 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
       case 'delivered': return 'badge-success';
       case 'failed': return 'badge-danger';
       case 'dead_letter': return 'badge-dead';
-      default: return 'badge-warning'; // queued, processing, scheduled
+      default: return 'badge-warning';
     }
   };
 
@@ -76,7 +75,8 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
         flexWrap: 'wrap',
         gap: '12px'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <ScrollText size={20} style={{ color: 'var(--accent)' }} />
           <h3 style={{ fontSize: '16px', margin: 0 }}>Delivery History</h3>
           <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
             Showing latest {logs.length} notifications
@@ -84,7 +84,7 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          {/* Limit selector */}
+          {/* Limit Selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
             <span style={{ color: 'var(--text-secondary)' }}>Limit:</span>
             <select
@@ -101,13 +101,14 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
 
           {/* Auto Refresh Toggle */}
           <button
-            className={`btn btn-sm ${autoRefresh ? 'btn-accent' : ''}`}
+            className={`btn btn-sm ${autoRefresh ? 'btn-ghost' : ''}`}
             onClick={() => {
               setAutoRefresh(!autoRefresh);
               setCountdown(5);
             }}
           >
-            {autoRefresh ? `⏸ Auto (${countdown}s)` : '▶ Enable Auto-Refresh'}
+            {autoRefresh ? <Pause size={14} /> : <Play size={14} />}
+            <span>{autoRefresh ? `Auto (${countdown}s)` : 'Auto-Refresh'}</span>
           </button>
 
           {/* Manual Refresh Button */}
@@ -118,7 +119,8 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
               setCountdown(5);
             }}
           >
-            🔄 Refresh
+            <RefreshCw size={14} />
+            <span>Refresh</span>
           </button>
         </div>
       </div>
@@ -142,8 +144,9 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
           Loading delivery logs...
         </div>
       ) : logs.length === 0 ? (
-        <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-faint)' }}>
-          No delivery records found for this tenant. Dispatch your first notification!
+        <div className="empty-state">
+          <Inbox size={40} className="empty-state-icon" />
+          <p className="empty-state-text">No delivery records found for this tenant yet.</p>
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
@@ -181,10 +184,14 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
                           fontFamily: 'var(--font-mono)',
                           fontSize: '12px',
                           cursor: 'pointer',
-                          padding: 0
+                          padding: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px'
                         }}
                       >
-                        {isCopied ? 'Copied!' : truncatedId}
+                        <span>{truncatedId}</span>
+                        {isCopied ? <Check size={12} style={{ color: 'var(--success)' }} /> : <Copy size={12} />}
                       </button>
                     </td>
                     <td style={{ padding: '10px 12px', fontFamily: 'var(--font-mono)' }}>
@@ -197,7 +204,8 @@ export const LogsPage: React.FC<LogsPageProps> = ({ onShowToast }) => {
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                       fontFamily: 'var(--font-mono)',
-                      fontSize: '12px'
+                      fontSize: '12px',
+                      color: 'var(--text-secondary)'
                     }}>
                       {log.recipient || log.email_recipient || log.discord_recipient || '-'}
                     </td>

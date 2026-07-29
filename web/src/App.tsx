@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { getApiKey } from './api/client';
 import { AuthModal } from './components/AuthModal';
 import { Layout, type NavView } from './components/Layout';
+import { DashboardPage } from './pages/DashboardPage';
 import { SendPage } from './pages/SendPage';
 import { LogsPage } from './pages/LogsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
@@ -9,7 +10,7 @@ import { ToastContainer, type ToastMessage } from './components/Toast';
 
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [currentView, setCurrentView] = useState<NavView>('send');
+  const [currentView, setCurrentView] = useState<NavView>('dashboard');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   useEffect(() => {
@@ -39,9 +40,15 @@ export function App() {
       onNavigate={setCurrentView}
       onLogout={() => setIsAuthenticated(false)}
     >
+      {currentView === 'dashboard' && (
+        <DashboardPage
+          onNavigateToSend={() => setCurrentView('send')}
+          onShowToast={showToast}
+        />
+      )}
       {currentView === 'send' && <SendPage onShowToast={showToast} />}
       {currentView === 'logs' && <LogsPage onShowToast={showToast} />}
-      {currentView !== 'send' && currentView !== 'logs' && (
+      {currentView !== 'dashboard' && currentView !== 'send' && currentView !== 'logs' && (
         <PlaceholderPage view={currentView} />
       )}
 
