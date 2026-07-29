@@ -6,6 +6,19 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 4 — DLQ & Provider Health Circuit Breaker (Step 2 complete ✅)
+
+| Feature | Status |
+|---|---|
+| Dead-Letter Queue stream (`relayhub:notifications:dlq`) & `status: "dead_letter"` DB state | ✅ |
+| Automatic DLQ promotion after 3 failed worker-level attempts | ✅ |
+| `GET /v1/notify/dead-letter` — list dead-lettered notifications for tenant | ✅ |
+| `POST /v1/notify/:request_id/replay` — re-enqueue dead-lettered notification for retry | ✅ |
+| In-memory circuit breaker per provider (5 consecutive failures → 60s open window) | ✅ |
+| Automatic circuit bypass in `channel="auto"` (skips open-circuit provider immediately) | ✅ |
+| Half-open trial recovery (single request probe after 60s window) | ✅ |
+| `GET /v1/health/providers` — public monitoring endpoint for provider health states | ✅ |
+
 ## Phase 4 — Async Queue & Background Workers (Step 1 complete ✅)
 
 | Feature | Status |
@@ -473,7 +486,116 @@ Notifications are validated (auth, rate limits, template rendering, idempotency)
 2. **Worker Processing:** Background worker goroutines (`WORKER_COUNT`, default 5) consume jobs from consumer group `relayhub-workers` using `XREADGROUP`.
 3. **Execution:** Workers run the delivery attempt via `dispatch.Executor` (handles retries, exponential back-off, channel fallbacks, Postgres status updates, and outbound webhooks), then issue `XACK`.
 4. **Crash Recovery:** A background reclaimer process runs every 60 seconds using `XAUTOCLAIM` to re-assign any unacknowledged jobs idle for >90 seconds (protecting against worker crashes).
-5. **Checking Final Status:** Call `GET /v1/notify/:request_id` to inspect the final delivery state (`delivered` or `failed`).
+5. **Checking Final Status:** Call `GET /v1/notify/:request_id` to inspect the final delivery state (`delivered`, `failed`, or `dead_letter`).
+
+---
+
+### `GET /v1/health/providers` *(no authentication required)*
+
+Public monitoring endpoint for inspecting the real-time circuit breaker health of all underlying providers (`discord`, `email`, `smtp`).
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "discord": "healthy",
+    "email":   "unhealthy",
+    "smtp":    "healthy"
+  }
+}
+```
+
+---
+
+### `GET /v1/notify/dead-letter`
+
+List notifications that have permanently failed after 3 worker-level attempts and landed in the Dead-Letter Queue (`relayhub:notifications:dlq`). Requires `X-API-Key`. Scoped to the authenticated tenant.
+
+**Query parameters:**
+- `limit` (optional): maximum records to return (default 50, max 200).
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "count": 1,
+    "notifications": [
+      {
+        "id": 42,
+        "tenant_id": "550e8400-...",
+        "request_id": "9b1deb4d-...",
+        "recipient": "invalid-address@example.com",
+        "channel": "email",
+        "message": "Hello!",
+        "status": "dead_letter",
+        "error_message": "exceeded maximum worker attempts",
+        "attempts": 3,
+        "created_at": "2026-07-29T16:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+---
+
+### `POST /v1/notify/:request_id/replay`
+
+Re-enqueue a dead-lettered notification back onto the main Redis stream for another delivery attempt. Resets worker attempt count to 0 and updates Postgres status to `queued`. Requires `X-API-Key`.
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "data": {
+    "request_id": "9b1deb4d-...",
+    "status":     "queued"
+  }
+}
+```
+
+**Errors:**
+- `404 Not Found`: notification does not exist or belongs to another tenant.
+- `409 Conflict`: notification is not currently in `dead_letter` status.
+
+---
+
+## Reliability & Failure Handling Architecture
+
+RelayHub is designed to handle failure at scale without losing notifications or blocking callers:
+
+```
+[ POST /v1/notify ]
+       │ (instant 201 queued)
+       ▼
+ [ Redis Stream ] ──(Worker Pool)──► [ dispatch.Executor ]
+                                             │
+      ┌──────────────────────────────────────┴──────────────────────────────────────┐
+      │                                                                             │
+      ▼ (Level 1: Retry)                                                            ▼ (Level 3: Circuit Breaker)
+ [ Provider Send ] ◄── 3x Exponential Backoff                                  [ health.Registry ]
+      │                                                                             │
+      ├─ Failed after 3 retries?                                                    ├─ 5 consecutive failures?
+      │  └─► (Level 2: Fallback)                                                    │  └─► Open circuit for 60s
+      │      Try secondary channel in "auto" mode                                   │      Skip provider instantly in "auto"
+      │      (Discord ──► Resend Email)                                             │      Probe with 1 trial request after 60s
+      │                                                                             │
+      └─ Worker process crashed / 3 worker attempts failed?                         └─────────────────────────────────────┘
+         └─► (Level 4: Dead-Letter Queue)
+             Move to relayhub:notifications:dlq
+             Postgres status = "dead_letter"
+             │
+             └─► (Level 5: Replay Endpoint)
+                 POST /v1/notify/:id/replay resets to queued and retries
+```
+
+1. **Level 1 — Per-Provider Retries (`retry.WithRetry`):** Every provider invocation retries up to 3 times with exponential back-off before reporting failure.
+2. **Level 2 — Channel Fallback (`channel: "auto"`):** If the primary channel (Discord) fails after its retries, the engine automatically attempts the secondary channel (Resend Email).
+3. **Level 3 — In-Memory Circuit Breaker (`health.Registry`):** Tracks consecutive failures per provider. After 5 consecutive failures, the provider circuit opens for 60 seconds. While open, `auto` routing bypasses the down provider immediately without waiting for timeouts. After 60 seconds, a single probe request is allowed through (half-open state); if it succeeds, the circuit closes.
+4. **Level 4 — Dead-Letter Queue (DLQ):** Unacknowledged jobs (e.g. worker crashes) are reclaimed via Redis `XAUTOCLAIM`. After 3 total worker-level attempts, the job is promoted to the DLQ stream (`relayhub:notifications:dlq`) and marked `dead_letter` in Postgres to protect worker capacity.
+5. **Level 5 — Manual Replay (`POST /v1/notify/:id/replay`):** Operators or tenants can inspect dead-lettered items via `GET /v1/notify/dead-letter` and re-trigger delivery once issues are resolved.
 
 ---
 
