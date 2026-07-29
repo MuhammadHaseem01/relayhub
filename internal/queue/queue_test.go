@@ -212,3 +212,42 @@ func TestMultipleJobs_OrderPreserved(t *testing.T) {
 		}
 	}
 }
+
+func TestDLQ_Enqueue_ReadDLQ_TenantIsolation(t *testing.T) {
+	q, _ := newTestQueue(t)
+	ctx := context.Background()
+
+	jobA := sampleJob("req-dlq-a")
+	jobA.TenantID = "tenant-A"
+	jobA.WorkerAttempts = 3
+
+	jobB := sampleJob("req-dlq-b")
+	jobB.TenantID = "tenant-B"
+	jobB.WorkerAttempts = 3
+
+	if err := q.EnqueueDLQ(ctx, jobA); err != nil {
+		t.Fatalf("EnqueueDLQ jobA: %v", err)
+	}
+	if err := q.EnqueueDLQ(ctx, jobB); err != nil {
+		t.Fatalf("EnqueueDLQ jobB: %v", err)
+	}
+
+	msgsA, err := q.ReadDLQ(ctx, "tenant-A", 50)
+	if err != nil {
+		t.Fatalf("ReadDLQ tenant-A: %v", err)
+	}
+	if len(msgsA) != 1 {
+		t.Fatalf("expected 1 DLQ msg for tenant-A, got %d", len(msgsA))
+	}
+	if msgsA[0].Job.RequestID != "req-dlq-a" || msgsA[0].Job.WorkerAttempts != 3 {
+		t.Errorf("unexpected job: %+v", msgsA[0].Job)
+	}
+
+	msgsB, err := q.ReadDLQ(ctx, "tenant-B", 50)
+	if err != nil {
+		t.Fatalf("ReadDLQ tenant-B: %v", err)
+	}
+	if len(msgsB) != 1 || msgsB[0].Job.RequestID != "req-dlq-b" {
+		t.Fatalf("expected job req-dlq-b for tenant-B, got: %v", msgsB)
+	}
+}

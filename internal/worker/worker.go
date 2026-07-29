@@ -11,13 +11,10 @@ import (
 )
 
 const (
-	blockDuration = 5 * time.Second
-
+	blockDuration   = 5 * time.Second
 	reclaimInterval = 60 * time.Second
-
-	reclaimMinIdle = 90 * time.Second
-
-	reclaimBatch = 50
+	reclaimMinIdle  = 90 * time.Second
+	reclaimBatch    = 50
 )
 
 type Pool struct {
@@ -95,7 +92,7 @@ func (p *Pool) runWorker(ctx context.Context, name string) {
 
 func (p *Pool) processOne(ctx context.Context, msg queue.Message, log *slog.Logger) {
 	job := msg.Job
-	log = log.With("request_id", job.RequestID, "channel", job.Channel)
+	log = log.With("request_id", job.RequestID, "channel", job.Channel, "worker_attempts", job.WorkerAttempts)
 	log.Info("worker: processing job")
 
 	_ = p.executor.Run(ctx, dispatch.Job{
@@ -106,10 +103,11 @@ func (p *Pool) processOne(ctx context.Context, msg queue.Message, log *slog.Logg
 		Message:          job.Message,
 		DiscordRecipient: job.DiscordRecipient,
 		EmailRecipient:   job.EmailRecipient,
+		WorkerAttempts:   job.WorkerAttempts,
 	})
-	if err := p.queue.Ack(ctx, msg.ID); err != nil {
-		log.Error("worker: failed to ACK message — will be reclaimed",
-			"stream_id", msg.ID, "error", err)
+
+	if ackErr := p.queue.Ack(ctx, msg.ID); ackErr != nil {
+		log.Error("worker: failed to ACK message", "stream_id", msg.ID, "error", ackErr)
 	} else {
 		log.Info("worker: job ACKed", "stream_id", msg.ID)
 	}
@@ -144,6 +142,7 @@ func (p *Pool) reclaim(ctx context.Context, log *slog.Logger) {
 	}
 	log.Info("reclaimer: re-processing orphaned jobs", "count", len(msgs))
 	for _, msg := range msgs {
+		msg.Job.WorkerAttempts++
 		p.processOne(ctx, msg, log)
 	}
 }
