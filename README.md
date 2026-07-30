@@ -6,19 +6,23 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
-## Phase 5 — React Dashboard Scaffold (Step 1 complete ✅)
+## Phase 5 — Full React Dashboard (Step 1 & Step 2 complete ✅)
 
 | Feature | Status |
 |---|---|
 | React + Vite + TypeScript frontend application in `/web` directory | ✅ |
-| Custom dark engineering theme (`Space Grotesk`, `Inter`, `JetBrains Mono` + GitHub dark palette) | ✅ |
+| Custom dark engineering theme (`Space Grotesk`, `Inter`, `JetBrains Mono` + Lucide vector icons) | ✅ |
 | Tenant Auth Flow — Register new tenant (shows API key once with copy) or paste existing key | ✅ |
 | API client module (`/web/src/api/client.ts`) with automatic `X-API-Key` header handling | ✅ |
 | CORS middleware on Go backend allowing dev origin (`http://localhost:5173`) | ✅ |
-| **Send Notification Page** — testing form for `email`, `discord`, `smtp`, `auto`, idempotency, `send_at` | ✅ |
-| **Live Delivery Inspector** — auto-polls `GET /v1/notify/:id` to track real-time queue → delivery | ✅ |
-| **Raw JSON Inspector Panel** — displays formatted API response with one-click JSON copy | ✅ |
+| **Dashboard Overview Page** — welcome header, 4 stat cards (Total Sent, Success Rate, Active Providers, Rate Limit), recent activity table | ✅ |
+| **Send Notification Page** — testing form for `email`, `discord`, `smtp`, `auto`, idempotency, `send_at`, live inspector, JSON panel | ✅ |
 | **Delivery Logs Page** — auto-refreshing table (5s interval countdown) of tenant delivery history | ✅ |
+| **Templates Page** — template CRUD, client-side live Handlebars `{{variables}}` preview | ✅ |
+| **Webhooks Page** — HTTPS endpoint manager, one-time HMAC secret reveal, recent webhook deliveries, signature verification guide | ✅ |
+| **Dead Letter Page** — DLQ listing, positive empty state, one-click job replay | ✅ |
+| **Provider Health Page** — circuit breaker status grid (discord, email, smtp), 5s auto-refresh, open circuit warning banner | ✅ |
+| **Usage Page** — 24-hour quota usage, color-shifting progress bar (accent/warning/danger), relative reset timer | ✅ |
 
 ## Phase 4 — DLQ & Provider Health Circuit Breaker (Step 2 complete ✅)
 
@@ -1121,5 +1125,4 @@ The frontend communicates with the backend via `VITE_API_BASE_URL` (default: `ht
 - **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
 - **Phase 3** ✅ Templates, scheduled sends (`send_at`), outbound webhooks (HMAC-signed), SMTP provider
 - **Phase 4** ✅ Redis Streams queue engine, worker pool, dead-letter queue, provider health circuit breakers
-- **Phase 5 Step 1** ✅ React + Vite dashboard scaffold, auth flow, Send Notification testing UI, Live Inspector, Delivery Logs
-- **Phase 5 Step 2** 🔜 Templates editor, Webhook manager, DLQ replay UI, Provider Health dashboard, Usage stats
+- **Phase 5** ✅ Full React Dashboard — Overview, Send, Logs, Templates, Webhooks, Dead Letter, Provider Health, Usage

@@ -5,7 +5,11 @@ import { Layout, type NavView } from './components/Layout';
 import { DashboardPage } from './pages/DashboardPage';
 import { SendPage } from './pages/SendPage';
 import { LogsPage } from './pages/LogsPage';
-import { PlaceholderPage } from './pages/PlaceholderPage';
+import { TemplatesPage } from './pages/TemplatesPage';
+import { WebhooksPage } from './pages/WebhooksPage';
+import { DeadLetterPage } from './pages/DeadLetterPage';
+import { ProviderHealthPage } from './pages/ProviderHealthPage';
+import { UsagePage } from './pages/UsagePage';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 
 export function App() {
@@ -48,9 +52,11 @@ export function App() {
       )}
       {currentView === 'send' && <SendPage onShowToast={showToast} />}
       {currentView === 'logs' && <LogsPage onShowToast={showToast} />}
-      {currentView !== 'dashboard' && currentView !== 'send' && currentView !== 'logs' && (
-        <PlaceholderPage view={currentView} />
-      )}
+      {currentView === 'templates' && <TemplatesPage onShowToast={showToast} />}
+      {currentView === 'webhooks' && <WebhooksPage onShowToast={showToast} />}
+      {currentView === 'dlq' && <DeadLetterPage onShowToast={showToast} />}
+      {currentView === 'health' && <ProviderHealthPage onShowToast={showToast} />}
+      {currentView === 'usage' && <UsagePage onShowToast={showToast} />}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </Layout>

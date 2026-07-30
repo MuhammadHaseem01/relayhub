@@ -30,15 +30,15 @@ export const Layout: React.FC<LayoutProps> = ({ currentView, onNavigate, onLogou
   const maskedKey = apiKey ? `${apiKey.slice(0, 7)}...${apiKey.slice(-6)}` : '';
   const [copiedKey, setCopiedKey] = useState(false);
 
-  const navItems: { id: NavView; label: string; icon: React.ReactNode; disabled?: boolean }[] = [
+  const navItems: { id: NavView; label: string; icon: React.ReactNode }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
     { id: 'send', label: 'Send Notification', icon: <Send size={18} /> },
     { id: 'logs', label: 'Delivery Logs', icon: <ScrollText size={18} /> },
-    { id: 'templates', label: 'Templates', icon: <Puzzle size={18} />, disabled: true },
-    { id: 'webhooks', label: 'Webhooks', icon: <Link2 size={18} />, disabled: true },
-    { id: 'dlq', label: 'Dead Letter', icon: <Skull size={18} />, disabled: true },
-    { id: 'health', label: 'Provider Health', icon: <HeartPulse size={18} />, disabled: true },
-    { id: 'usage', label: 'Usage', icon: <BarChart3 size={18} />, disabled: true },
+    { id: 'templates', label: 'Templates', icon: <Puzzle size={18} /> },
+    { id: 'webhooks', label: 'Webhooks', icon: <Link2 size={18} /> },
+    { id: 'dlq', label: 'Dead Letter', icon: <Skull size={18} /> },
+    { id: 'health', label: 'Provider Health', icon: <HeartPulse size={18} /> },
+    { id: 'usage', label: 'Usage', icon: <BarChart3 size={18} /> },
   ];
 
   const handleCopyKey = () => {
@@ -102,7 +102,7 @@ export const Layout: React.FC<LayoutProps> = ({ currentView, onNavigate, onLogou
             return (
               <button
                 key={item.id}
-                onClick={() => !item.disabled && onNavigate(item.id)}
+                onClick={() => onNavigate(item.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -111,10 +111,10 @@ export const Layout: React.FC<LayoutProps> = ({ currentView, onNavigate, onLogou
                   borderRadius: 'var(--radius-md)',
                   border: 'none',
                   backgroundColor: isActive ? 'var(--surface-2)' : 'transparent',
-                  color: isActive ? 'var(--text-primary)' : item.disabled ? 'var(--text-faint)' : 'var(--text-secondary)',
+                  color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
                   fontWeight: isActive ? 600 : 400,
                   fontSize: '13px',
-                  cursor: item.disabled ? 'not-allowed' : 'pointer',
+                  cursor: 'pointer',
                   textAlign: 'left',
                   width: '100%',
                   transition: 'all 0.15s ease'
@@ -124,21 +124,6 @@ export const Layout: React.FC<LayoutProps> = ({ currentView, onNavigate, onLogou
                   {item.icon}
                 </span>
                 <span style={{ flex: 1 }}>{item.label}</span>
-                {item.disabled && (
-                  <span style={{
-                    fontSize: '10px',
-                    fontWeight: 600,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    padding: '2px 6px',
-                    borderRadius: '4px',
-                    backgroundColor: 'var(--surface-2)',
-                    color: 'var(--text-faint)',
-                    border: '1px solid var(--border)'
-                  }}>
-                    Step 2
-                  </span>
-                )}
               </button>
             );
           })}
