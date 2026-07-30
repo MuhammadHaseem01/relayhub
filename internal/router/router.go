@@ -81,6 +81,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /v1/templates/{name}", auth(http.HandlerFunc(s.handleUpdateTemplate)))
 	mux.Handle("DELETE /v1/templates/{name}", auth(http.HandlerFunc(s.handleDeleteTemplate)))
 
+	mux.Handle("GET /v1/webhook", auth(http.HandlerFunc(s.handleGetWebhook)))
 	mux.Handle("PUT /v1/webhook", auth(http.HandlerFunc(s.handleSetWebhook)))
 	mux.Handle("DELETE /v1/webhook", auth(http.HandlerFunc(s.handleDeleteWebhook)))
 	mux.Handle("GET /v1/webhook/deliveries", auth(http.HandlerFunc(s.handleGetWebhookDeliveries)))
@@ -724,6 +725,17 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		"used":      usage.Count,
 		"remaining": remaining,
 		"resets_at": resetsAt,
+	})
+}
+
+func (s *Server) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	writeOK(w, map[string]string{
+		"webhook_url": tenant.WebhookURL,
 	})
 }
 
