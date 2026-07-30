@@ -6,6 +6,24 @@ RelayHub is a self-hostable, multi-tenant notification platform. Instead of inte
 
 ---
 
+## Phase 5 — Full React Dashboard (Step 1 & Step 2 complete ✅)
+
+| Feature | Status |
+|---|---|
+| React + Vite + TypeScript frontend application in `/web` directory | ✅ |
+| Custom dark engineering theme (`Space Grotesk`, `Inter`, `JetBrains Mono` + Lucide vector icons) | ✅ |
+| Tenant Auth Flow — Register new tenant (shows API key once with copy) or paste existing key | ✅ |
+| API client module (`/web/src/api/client.ts`) with automatic `X-API-Key` header handling | ✅ |
+| CORS middleware on Go backend allowing dev origin (`http://localhost:5173`) | ✅ |
+| **Dashboard Overview Page** — welcome header, 4 stat cards (Total Sent, Success Rate, Active Providers, Rate Limit), recent activity table | ✅ |
+| **Send Notification Page** — testing form for `email`, `discord`, `smtp`, `auto`, idempotency, `send_at`, live inspector, JSON panel | ✅ |
+| **Delivery Logs Page** — auto-refreshing table (5s interval countdown) of tenant delivery history | ✅ |
+| **Templates Page** — template CRUD, client-side live Handlebars `{{variables}}` preview | ✅ |
+| **Webhooks Page** — HTTPS endpoint manager, one-time HMAC secret reveal, recent webhook deliveries, signature verification guide | ✅ |
+| **Dead Letter Page** — DLQ listing, positive empty state, one-click job replay | ✅ |
+| **Provider Health Page** — circuit breaker status grid (discord, email, smtp), 5s auto-refresh, open circuit warning banner | ✅ |
+| **Usage Page** — 24-hour quota usage, color-shifting progress bar (accent/warning/danger), relative reset timer | ✅ |
+
 ## Phase 4 — DLQ & Provider Health Circuit Breaker (Step 2 complete ✅)
 
 | Feature | Status |
@@ -1069,12 +1087,42 @@ Response:
 
 ---
 
+## React Dashboard (`/web`)
+
+RelayHub includes an internal engineering testing dashboard built with **Vite + React + TypeScript**. It allows developers to visually test notification dispatching, track queue-to-delivery progression in real time, and audit tenant delivery history.
+
+### Running the Dashboard
+
+1. **Ensure the Go backend is running:**
+   ```bash
+   docker compose up -d
+   # or locally: go run ./cmd/server
+   ```
+
+2. **Start the React dev server:**
+   ```bash
+   cd web
+   npm install
+   npm run dev
+   ```
+
+3. Open **http://localhost:5173** in your browser.
+
+### Connecting to Backend
+
+The frontend communicates with the backend via `VITE_API_BASE_URL` (default: `http://localhost:8080`). All requests are routed through `/web/src/api/client.ts` which automatically attaches the `X-API-Key` header from stored authentication state.
+
+### Authentication & Storage Tradeoff Note
+
+> ℹ️ **Security Note on API Key Storage:**
+> The dashboard stores the tenant API key in browser `localStorage` + in-memory state. This design choice is **acceptable and intended** because the RelayHub Dashboard is a developer testing / internal engineering tool, not a public multi-tenant SaaS authentication client. In production deployments, standard session cookies or backend-proxied tokens would be used instead.
+
+---
+
 ## Roadmap
 
 - **Phase 1** ✅ Core engine — Discord provider, Email provider, delivery logs, retry, fallback, idempotency
 - **Phase 2** ✅ Multi-tenancy — API key auth, per-tenant data isolation, rate limiting (100/day), usage stats
-- **Phase 3 Step 1** ✅ Message templates — CRUD endpoints, `{{variable}}` substitution, tenant isolation
-- **Phase 3 Step 2** ✅ Scheduled sends — `send_at`, background scheduler, cancel endpoint, multi-instance safe
-- **Phase 3 Step 3** ✅ Outbound webhooks — HMAC-signed push events, async delivery, retry, audit log
-- **Phase 4** 🔜 Redis Streams queue, worker pool, dead-letter queue
-- **Phase 5** 🔜 React dashboard — logs, usage charts, template editor
+- **Phase 3** ✅ Templates, scheduled sends (`send_at`), outbound webhooks (HMAC-signed), SMTP provider
+- **Phase 4** ✅ Redis Streams queue engine, worker pool, dead-letter queue, provider health circuit breakers
+- **Phase 5** ✅ Full React Dashboard — Overview, Send, Logs, Templates, Webhooks, Dead Letter, Provider Health, Usage

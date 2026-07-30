@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -80,6 +81,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /v1/templates/{name}", auth(http.HandlerFunc(s.handleUpdateTemplate)))
 	mux.Handle("DELETE /v1/templates/{name}", auth(http.HandlerFunc(s.handleDeleteTemplate)))
 
+	mux.Handle("GET /v1/webhook", auth(http.HandlerFunc(s.handleGetWebhook)))
 	mux.Handle("PUT /v1/webhook", auth(http.HandlerFunc(s.handleSetWebhook)))
 	mux.Handle("DELETE /v1/webhook", auth(http.HandlerFunc(s.handleDeleteWebhook)))
 	mux.Handle("GET /v1/webhook/deliveries", auth(http.HandlerFunc(s.handleGetWebhookDeliveries)))
@@ -89,6 +91,27 @@ func (s *Server) routes() http.Handler {
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowedOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
+		if allowedOrigins == "" {
+			allowedOrigins = "http://localhost:5173"
+		}
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			for _, o := range strings.Split(allowedOrigins, ",") {
+				if strings.TrimSpace(o) == origin {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Idempotency-Key")
+					break
+				}
+			}
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if len(r.URL.Path) > 1 && strings.HasSuffix(r.URL.Path, "/") {
 			r.URL.Path = strings.TrimRight(r.URL.Path, "/")
 		}
@@ -702,6 +725,17 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		"used":      usage.Count,
 		"remaining": remaining,
 		"resets_at": resetsAt,
+	})
+}
+
+func (s *Server) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := middleware.TenantFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	writeOK(w, map[string]string{
+		"webhook_url": tenant.WebhookURL,
 	})
 }
 
